@@ -93,22 +93,32 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<BinTarget> 
         return Vec::new();
     }
 
-    let mut bins: Vec<BinTarget> = manifest
+    let entries = manifest
         .get("bin")
         .and_then(|b| b.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    let name = entry.get("name")?.as_str()?;
-                    Some(BinTarget {
-                        name: name.to_string(),
-                        required_features: string_list(entry.get("required-features")),
-                    })
-                })
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
+
+    let mut bins: Vec<BinTarget> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name")?.as_str()?;
+            Some(BinTarget {
+                name: name.to_string(),
+                required_features: string_list(entry.get("required-features")),
+            })
+        })
+        .collect();
+
+    // Source files an explicit target already owns. Cargo does not
+    // auto-discover a file that a `[[bin]]` points at, so a target declared as
+    // `name = "renamed", path = "src/main.rs"` must not also produce an
+    // implicit target named after the package — that target does not exist,
+    // and `cargo run --bin <package>` would fail.
+    let claimed: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| entry.get("path")?.as_str().map(normalize_path))
+        .collect();
 
     // `autobins = false` turns the auto-discovery off.
     let autobins = manifest
@@ -122,6 +132,7 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<BinTarget> 
 
     // The implicit binary is named after the package.
     if dir.join("src/main.rs").is_file()
+        && !claimed.iter().any(|p| p == "src/main.rs")
         && let Some(name) = manifest
             .get("package")
             .and_then(|p| p.get("name"))
@@ -135,13 +146,29 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<BinTarget> 
     if let Ok(entries) = std::fs::read_dir(dir.join("src/bin")) {
         for entry in entries.flatten() {
             let path = entry.path();
-            let name = if path.is_dir() && path.join("main.rs").is_file() {
-                path.file_name().map(|n| n.to_string_lossy().into_owned())
+            let (name, source) = if path.is_dir() && path.join("main.rs").is_file() {
+                (
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                    path.join("main.rs"),
+                )
             } else if path.extension().is_some_and(|e| e == "rs") {
-                path.file_stem().map(|n| n.to_string_lossy().into_owned())
+                (
+                    path.file_stem().map(|n| n.to_string_lossy().into_owned()),
+                    path.clone(),
+                )
             } else {
-                None
+                (None, path.clone())
             };
+
+            // Same rule as `src/main.rs`: a file an explicit target points at
+            // is not auto-discovered.
+            let relative = source
+                .strip_prefix(dir)
+                .ok()
+                .map(|p| normalize_path(&p.to_string_lossy()));
+            if relative.is_some_and(|r| claimed.contains(&r)) {
+                continue;
+            }
             if let Some(name) = name
                 && !bins.iter().any(|b| b.name == name)
             {
@@ -153,6 +180,12 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<BinTarget> 
     // Directory order is filesystem-dependent; sort for a stable menu.
     bins.sort_by(|a, b| a.name.cmp(&b.name));
     bins
+}
+
+/// Normalise a manifest path for comparison: `./src/main.rs` and
+/// `src\\main.rs` both become `src/main.rs`.
+fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 /// Read a TOML array of strings, ignoring anything that is not one.
@@ -307,6 +340,36 @@ mod tests {
         assert!(
             scripts.contains(&"cargo run --bin 'a; touch /tmp/pwned'".to_string()),
             "{scripts:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_invent_an_implicit_target_for_a_claimed_source_file() {
+        // Cargo does not auto-discover a file an explicit [[bin]] points at,
+        // so `src/main.rs` here belongs to "renamed" only. Inventing a
+        // package-named target would produce `cargo run --bin x`, which fails.
+        let manifest = format!("{PACKAGE}\n[[bin]]\nname = \"renamed\"\npath = \"src/main.rs\"\n");
+        let path = write_package("renamed-main", &manifest, &["src/main.rs"]);
+        let labels = labels(&path);
+        assert!(
+            !labels.iter().any(|l| l.contains("--bin x")),
+            "no target named after the package exists: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"cargo run".to_string()),
+            "one binary, so a bare run is unambiguous: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_invent_an_implicit_target_for_a_claimed_src_bin_file() {
+        let manifest =
+            format!("{PACKAGE}\n[[bin]]\nname = \"renamed\"\npath = \"./src/bin/a.rs\"\n");
+        let path = write_package("renamed-src-bin", &manifest, &["src/bin/a.rs"]);
+        let labels = labels(&path);
+        assert!(
+            !labels.iter().any(|l| l.contains("--bin a")),
+            "src/bin/a.rs belongs to \"renamed\": {labels:?}"
         );
     }
 

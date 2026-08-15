@@ -16,6 +16,44 @@ pub struct Config {
     pub sources: Vec<PathBuf>,
 }
 
+/// Whether a file declares `merge: false`, read on its own.
+///
+/// Only this one key is looked at, and every other key is tolerated, so the
+/// answer does not depend on the rest of the file being valid.
+fn reads_as_fallback(path: &Path, text: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct MergeOnly {
+        #[serde(default = "default_true")]
+        merge: bool,
+    }
+
+    fn default_true() -> bool {
+        true
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    // Each format has its own error type; only "did it say merge: false"
+    // matters here, so collapse them all to an Option.
+    let merge: Option<bool> = match ext.as_str() {
+        "yaml" | "yml" => serde_yaml_ng::from_str::<MergeOnly>(text)
+            .ok()
+            .map(|m| m.merge),
+        "toml" => toml::from_str::<MergeOnly>(text).ok().map(|m| m.merge),
+        "json" => serde_json::from_str::<MergeOnly>(text)
+            .ok()
+            .map(|m| m.merge),
+        _ => None,
+    };
+
+    // Unreadable even in this permissive shape: let the real parse report it.
+    merge == Some(false)
+}
+
 /// Parse one configuration file, dispatching on the extension.
 ///
 /// A bare top-level list is accepted as a shorthand for `menu:`, so the
@@ -80,9 +118,20 @@ pub fn load(start_dir: &Path) -> Result<Config> {
     for path in discovery::all_config_paths(start_dir) {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+
+        // Decide `merge` before validating anything else. A fallback file that
+        // will be skipped must not be able to abort startup with an error in a
+        // part of it nobody is going to read — that is the whole point of it
+        // being inactive.
+        if !config.sources.is_empty() && reads_as_fallback(&path, &text) {
+            continue;
+        }
+
         let file =
             parse(&path, &text).with_context(|| format!("failed to parse {}", path.display()))?;
 
+        // The early check above already skipped this case, but keep the
+        // condition intact so the rule survives if that fast path changes.
         if !file.merge && !config.sources.is_empty() {
             continue;
         }
@@ -207,6 +256,42 @@ mod tests {
         let flags = config.auto_launchers.unwrap();
         assert!(!flags.makefile());
         assert!(flags.package_json());
+    }
+
+    #[test]
+    fn recognises_a_fallback_file_even_when_the_rest_is_invalid() {
+        // A file that is going to be skipped must not be able to abort
+        // startup with an error nobody would have read.
+        let text = "merge: false\nmenu:\n  - titel: typo\n";
+        assert!(reads_as_fallback(Path::new("a.yaml"), text));
+        assert!(
+            parse_str("a.yaml", text).is_err(),
+            "still invalid on its own"
+        );
+    }
+
+    #[test]
+    fn does_not_treat_a_normal_file_as_a_fallback() {
+        assert!(!reads_as_fallback(Path::new("a.yaml"), "menu: []"));
+        assert!(!reads_as_fallback(
+            Path::new("a.yaml"),
+            "merge: true\nmenu: []"
+        ));
+    }
+
+    #[test]
+    fn leaves_an_unreadable_file_to_the_real_parser() {
+        // Not valid in any shape: reporting it is the real parse's job.
+        assert!(!reads_as_fallback(Path::new("a.yaml"), "\t: : ["));
+    }
+
+    #[test]
+    fn recognises_a_fallback_file_in_every_format() {
+        assert!(reads_as_fallback(Path::new("a.toml"), "merge = false\n"));
+        assert!(reads_as_fallback(
+            Path::new("a.json"),
+            r#"{"merge": false}"#
+        ));
     }
 
     #[test]

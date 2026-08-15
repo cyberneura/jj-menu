@@ -9,7 +9,7 @@ mod menu;
 mod shell_init;
 mod ui;
 
-use std::io::{IsTerminal, Write, stdout};
+use std::io::{IsTerminal, Write, stderr, stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -95,10 +95,14 @@ fn run() -> Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     }
 
-    // The menu needs a real terminal to read keys from; without one, say so
-    // rather than failing deep inside crossterm.
+    // The menu reads keys from stdin and draws on stderr, so both have to be
+    // a terminal. Checking stdin alone would let `jj 2>menu.log` block on a
+    // menu nobody can see, with the escape sequences going into the log.
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("no terminal available (stdin is not a TTY)");
+    }
+    if !stderr().is_terminal() {
+        anyhow::bail!("no terminal available (stderr is not a TTY; the menu is drawn there)");
     }
 
     let title = format!("jj-menu — {}", start_dir.display());

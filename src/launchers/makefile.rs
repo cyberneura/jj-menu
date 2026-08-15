@@ -51,12 +51,16 @@ pub fn scan(path: &Path, start_dir: &Path) -> Option<LauncherGroup> {
 /// - special targets (`.PHONY`, `.DEFAULT_GOAL`, ...) — not runnable
 /// - pattern rules (`%.o: %.c`) — need a concrete file name
 /// - names built from variables (`$(BIN): ...`) — the value is unknown here
-/// - variable assignments (`CC := gcc`) and recipe lines (indented with a tab)
+/// - variable assignments (`CC := gcc`) and recipe lines, which start with the
+///   recipe prefix: a tab, or whatever `.RECIPEPREFIX` was last set to
 /// - the body of a `define`, which make does not read as makefile syntax
 ///   until the variable is expanded, so a `fake:` line in there is text
 fn parse_targets(text: &str) -> Vec<String> {
     let mut targets = Vec::new();
     let mut in_define = false;
+    // `.RECIPEPREFIX` applies from where it is set, so it is tracked while
+    // reading rather than looked up once.
+    let mut recipe_prefix = '\t';
 
     for line in text.lines() {
         let start = line.trim_start();
@@ -72,7 +76,11 @@ fn parse_targets(text: &str) -> Vec<String> {
             in_define = true;
             continue;
         }
-        if line.starts_with('\t') || start.starts_with('#') {
+        if let Some(prefix) = recipe_prefix_assignment(start) {
+            recipe_prefix = prefix;
+            continue;
+        }
+        if line.starts_with(recipe_prefix) || start.starts_with('#') {
             continue;
         }
         let Some((left, right)) = line.split_once(':') else {
@@ -97,6 +105,17 @@ fn parse_targets(text: &str) -> Vec<String> {
     }
 
     targets
+}
+
+/// The recipe prefix a `.RECIPEPREFIX` assignment sets, if this line is one.
+///
+/// make takes the first character of the value, and an empty value puts the
+/// tab back.
+fn recipe_prefix_assignment(line: &str) -> Option<char> {
+    let rest = line.strip_prefix(".RECIPEPREFIX")?;
+    // `=`, `:=`, `::=`, `?=` and `+=` all end in the `=` that starts the value.
+    let value = rest.trim_start().split_once('=')?.1;
+    Some(value.trim_start().chars().next().unwrap_or('\t'))
 }
 
 #[cfg(test)]
@@ -133,6 +152,27 @@ mod tests {
     #[test]
     fn skips_the_body_of_an_assigning_or_overridden_define() {
         let targets = parse_targets("override define recipe :=\nfake:\nendef\nbuild:\n\ttrue\n");
+        assert_eq!(targets, vec!["build"]);
+    }
+
+    #[test]
+    fn honours_a_recipe_prefix_other_than_tab() {
+        // With `.RECIPEPREFIX = >`, `>echo fake:` is a recipe line, not a rule.
+        let targets = parse_targets(".RECIPEPREFIX = >\nbuild:\n>echo fake:\n>true\n");
+        assert_eq!(targets, vec!["build"]);
+    }
+
+    #[test]
+    fn treats_a_tab_as_an_ordinary_line_once_the_prefix_has_changed() {
+        // make only strips the active prefix, so a tab is plain indentation
+        // and the rule written after it is a real one.
+        let targets = parse_targets(".RECIPEPREFIX = >\n\treal:\n>true\n");
+        assert_eq!(targets, vec!["real"]);
+    }
+
+    #[test]
+    fn an_empty_recipe_prefix_assignment_restores_the_tab() {
+        let targets = parse_targets(".RECIPEPREFIX = >\n.RECIPEPREFIX =\nbuild:\n\tfake:\n");
         assert_eq!(targets, vec!["build"]);
     }
 

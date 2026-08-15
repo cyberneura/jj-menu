@@ -27,11 +27,16 @@ pub enum Outcome {
 }
 
 /// Restores the terminal when the menu ends, including on a panic or an early
-/// return, so a crash cannot leave the shell in raw mode.
+/// return, so a crash cannot leave the shell in raw mode. A signal that kills
+/// the process outright runs no destructor; [`crate::signal`] covers that.
 struct TerminalGuard;
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
+        // Before raw mode, so that what the signal handler restores is the
+        // state the shell had. Drop cannot run when the process is killed
+        // outright, and this is the only cover for that (see crate::signal).
+        crate::signal::arm_terminal_restore();
         terminal::enable_raw_mode()?;
         // Armed before entering the alternate screen: if that fails, the guard
         // is dropped on the way out and raw mode is undone. Constructing it
@@ -46,6 +51,9 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(stderr(), cursor::Show, terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
+        // The terminal is the caller's again, so the handler must stop
+        // touching it -- the selected command runs next and owns it.
+        crate::signal::disarm_terminal_restore();
     }
 }
 

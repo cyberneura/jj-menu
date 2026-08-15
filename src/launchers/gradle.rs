@@ -271,13 +271,15 @@ fn applied_plugins(text: &str, scope: Scope) -> Vec<String> {
                 Some((id, rest)) => (id.to_string(), rest),
                 None => continue,
             },
-            // `apply plugin: 'java'`, `apply(plugin = "java")`. Keying on
-            // `plugin` rather than `apply` keeps the two spellings together,
-            // and does not collide with the `plugins` block.
-            Token::Word("plugin") => match argument(rest, &['(', ':', '=']) {
-                Some((id, rest)) => (id.to_string(), rest),
-                None => continue,
-            },
+            // `apply plugin: 'java'`, `apply(plugin = "java")`. Both
+            // spellings put `plugin` right after `apply`, which is what
+            // separates them from an ordinary `def plugin = 'java'`.
+            Token::Word("plugin") if follows_apply(&tokens[..index]) => {
+                match argument(rest, &['(', ':', '=']) {
+                    Some((id, rest)) => (id.to_string(), rest),
+                    None => continue,
+                }
+            }
             // `kotlin("jvm")` is shorthand for the qualified plugin id, and
             // is likewise only a declaration inside a `plugins` block.
             Token::Word("kotlin") if plugins_from.is_some() => match argument(rest, &['(']) {
@@ -291,6 +293,20 @@ fn applied_plugins(text: &str, scope: Scope) -> Vec<String> {
         }
     }
     plugins
+}
+
+/// Whether these tokens end in the `apply` that `apply plugin:` starts with,
+/// in either DSL (`apply plugin: 'java'`, `apply(plugin = "java")`).
+fn follows_apply(before: &[Token]) -> bool {
+    match before.last() {
+        Some(Token::Word("apply")) => true,
+        // The Kotlin spelling puts the opening parenthesis in between.
+        Some(Token::Symbol('(')) => matches!(
+            before.len().checked_sub(2).and_then(|i| before.get(i)),
+            Some(Token::Word("apply"))
+        ),
+        _ => false,
+    }
 }
 
 /// The string a declaration takes as its argument, along with what follows it.
@@ -754,6 +770,26 @@ mod tests {
         let dir = tempdir("apply-anywhere");
         let script = dir.join("build.gradle");
         fs::write(&script, "apply plugin: 'java'\n").unwrap();
+        assert!(labels(&scan(None, Some(&script), &dir).unwrap()).contains(&"gradle test".into()));
+    }
+
+    #[test]
+    fn ignores_a_variable_that_happens_to_be_called_plugin() {
+        // `def plugin = 'java'` assigns a string; it applies nothing.
+        let dir = tempdir("plugin-variable");
+        let script = dir.join("build.gradle");
+        fs::write(&script, "def plugin = 'java'\n").unwrap();
+        assert_eq!(
+            labels(&scan(None, Some(&script), &dir).unwrap()),
+            vec!["gradle tasks"]
+        );
+    }
+
+    #[test]
+    fn takes_the_kotlin_dsl_spelling_of_apply_plugin() {
+        let dir = tempdir("apply-kotlin");
+        let script = dir.join("build.gradle.kts");
+        fs::write(&script, "apply(plugin = \"java\")\n").unwrap();
         assert!(labels(&scan(None, Some(&script), &dir).unwrap()).contains(&"gradle test".into()));
     }
 

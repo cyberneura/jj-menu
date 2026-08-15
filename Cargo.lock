@@ -273,6 +273,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml_ng",

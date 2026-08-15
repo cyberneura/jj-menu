@@ -7,6 +7,7 @@ mod exec;
 mod launchers;
 mod menu;
 mod shell_init;
+mod signal;
 mod ui;
 
 use std::io::{IsTerminal, Write, stderr, stdout};

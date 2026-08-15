@@ -239,6 +239,10 @@ fails is worse than a missing one:
 
 - **Makefile**: pattern rules (`%.o: %.c`) and targets built from variables
   (`$(BIN):`) are skipped — they need a concrete file name that only you know.
+  So is anything inside a `define ... endef`, which make does not read as
+  makefile syntax until the variable is expanded. Recipe lines are recognised
+  by the active recipe prefix, so a `.RECIPEPREFIX` other than tab is
+  honoured.
 - **Gradle**: the real task list can only be obtained by running
   `./gradlew tasks`, which starts a JVM and evaluates the build script. That is
   far too slow to do while opening a menu, so the tasks are inferred from the

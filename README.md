@@ -223,8 +223,8 @@ for project files in the current directory and its ancestors.
 | --- | --- |
 | `package.json` | Every `scripts` entry, run with the package manager implied by the nearest lock file — searched upwards, stopping at the repository root or your home directory (pnpm, yarn, bun, npm; npm if none is found) |
 | `Makefile` | Every target that can run without extra arguments |
-| `Cargo.toml` | `build`, `test`, `check`, `fmt`, `clippy`, and `run` — named per binary when there are several, and omitted for a virtual workspace |
-| Gradle | `build`, `test`, `clean`, `assemble`, `check`, `tasks`, using `./gradlew` when present |
+| `Cargo.toml` | `build`, `test`, `check`, `fmt`, `clippy`, and `run` — named per binary when there are several, omitted when there is none, and carrying `--features` for a target with `required-features` |
+| Gradle | `build`, `test`, `clean`, `assemble`, `check`, `tasks`, using `./gradlew` when present — the wrapper is looked up separately from the build script, so a root wrapper is used for a subproject |
 
 In a Node project with no jj-menu file, `jj` is therefore just a list of npm
 scripts.
@@ -243,16 +243,25 @@ fails is worse than a missing one:
   `./gradlew tasks`, which starts a JVM and evaluates the build script. That is
   far too slow to do while opening a menu, so a fixed set of lifecycle tasks is
   offered, plus a `tasks` entry to discover the rest.
-- **Cargo**: `cargo run` is omitted for a virtual workspace (nothing to run) and
-  replaced by one `cargo run --bin ...` per target when the package declares
-  several, because a bare `cargo run` would be ambiguous.
+- **Cargo**: `cargo run` is omitted when the package has no binary at all (a
+  virtual workspace, or a library-only package) and replaced by one
+  `cargo run --bin ...` per target when there are several, because a bare
+  `cargo run` would be ambiguous. Binaries auto-discovered from `src/main.rs`
+  and `src/bin/` are counted, and `required-features` is passed through as
+  `--features`.
+- **Gradle**: commands are run from the directory holding the build script.
+  Gradle takes the project directory from the working directory and rejects one
+  that is not part of the build, so opening the menu in, say, `src/main/java`
+  would otherwise fail.
 - Tools that take positional arguments (`fab`, `cap`, ...) are not scanned at
   all. Define those explicitly with `args`, which is exactly what `args` is for.
 
-Names taken from a project file (npm script names, make targets) are quoted
-before being put in a command. They come from the repository rather than from
-whoever wrote the menu, so a name like `build; rm -rf /` must not be able to add
-a second command.
+Names taken from a project file (npm script names, make targets, Cargo binary
+names) are quoted before being put in a command, and every string drawn on
+screen has its control characters replaced with `·`. They come from the
+repository rather than from whoever wrote the menu, so a name like
+`build; rm -rf /` must not be able to add a second command, and one containing
+an ESC must not be able to drive the terminal just by being displayed.
 
 ### Turning them off
 

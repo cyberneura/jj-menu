@@ -30,16 +30,19 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
     // - a virtual workspace or a library-only package has nothing to run
     // - two or more binaries make a bare `cargo run` ambiguous, so name each
     let bins = binary_targets(&manifest, path.parent());
-    match bins.len() {
-        0 => {}
-        1 => items.push(MenuItem::command("cargo run", "cargo run")),
-        _ => {
-            for bin in bins {
+    match bins.as_slice() {
+        [] => {}
+        [only] => items.push(MenuItem::command(
+            "cargo run",
+            format!("cargo run{}", features_flag(only)),
+        )),
+        many => {
+            for bin in many {
                 // The name comes from a manifest in the repository, so quote
                 // it for the same reason npm script names are quoted.
                 items.push(MenuItem::command(
-                    format!("cargo run --bin {bin}"),
-                    format!("cargo run --bin {}", quote(&bin)),
+                    format!("cargo run --bin {}", bin.name),
+                    format!("cargo run --bin {}{}", quote(&bin.name), features_flag(bin)),
                 ));
             }
         }
@@ -51,6 +54,32 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
     })
 }
 
+/// A binary target Cargo can run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinTarget {
+    name: String,
+    /// `required-features` from the manifest. Without passing these, Cargo
+    /// refuses to run the target and asks for `--features`.
+    required_features: Vec<String>,
+}
+
+impl BinTarget {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            required_features: Vec::new(),
+        }
+    }
+}
+
+/// The `--features` argument a target needs, or an empty string.
+fn features_flag(bin: &BinTarget) -> String {
+    if bin.required_features.is_empty() {
+        return String::new();
+    }
+    format!(" --features {}", quote(&bin.required_features.join(",")))
+}
+
 /// Every binary Cargo would see for this manifest.
 ///
 /// Counting only `[[bin]]` is not enough: Cargo also auto-discovers
@@ -59,17 +88,24 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
 /// `[[bin]]` look unambiguous when it is not.
 ///
 /// A virtual workspace (no `[package]`) has no targets of its own.
-fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<String> {
+fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<BinTarget> {
     if manifest.get("package").is_none() {
         return Vec::new();
     }
 
-    let mut names: Vec<String> = manifest
+    let mut bins: Vec<BinTarget> = manifest
         .get("bin")
         .and_then(|b| b.as_array())
-        .map(|bins| {
-            bins.iter()
-                .filter_map(|b| b.get("name")?.as_str().map(str::to_string))
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.get("name")?.as_str()?;
+                    Some(BinTarget {
+                        name: name.to_string(),
+                        required_features: string_list(entry.get("required-features")),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -81,7 +117,7 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<String> {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let Some(dir) = dir.filter(|_| autobins) else {
-        return names;
+        return bins;
     };
 
     // The implicit binary is named after the package.
@@ -90,9 +126,9 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<String> {
             .get("package")
             .and_then(|p| p.get("name"))
             .and_then(|v| v.as_str())
-        && !names.iter().any(|n| n == name)
+        && !bins.iter().any(|b| b.name == name)
     {
-        names.push(name.to_string());
+        bins.push(BinTarget::new(name));
     }
 
     // `src/bin/foo.rs` and `src/bin/foo/main.rs` are binaries named `foo`.
@@ -107,16 +143,29 @@ fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<String> {
                 None
             };
             if let Some(name) = name
-                && !names.contains(&name)
+                && !bins.iter().any(|b| b.name == name)
             {
-                names.push(name);
+                bins.push(BinTarget::new(name));
             }
         }
     }
 
     // Directory order is filesystem-dependent; sort for a stable menu.
-    names.sort();
-    names
+    bins.sort_by(|a, b| a.name.cmp(&b.name));
+    bins
+}
+
+/// Read a TOML array of strings, ignoring anything that is not one.
+fn string_list(value: Option<&toml::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -258,6 +307,51 @@ mod tests {
         assert!(
             scripts.contains(&"cargo run --bin 'a; touch /tmp/pwned'".to_string()),
             "{scripts:?}"
+        );
+    }
+
+    #[test]
+    fn passes_required_features_of_a_single_binary() {
+        // Without `--features`, Cargo refuses to run the target and asks
+        // for exactly these features.
+        let manifest = format!(
+            "{PACKAGE}\n[features]\ncli = []\n\n\
+             [[bin]]\nname = \"x\"\npath = \"src/main.rs\"\nrequired-features = [\"cli\"]\n"
+        );
+        let path = write_package("required-features-one", &manifest, &["src/main.rs"]);
+        let scripts: Vec<String> = scan(&path)
+            .unwrap()
+            .items
+            .iter()
+            .filter_map(|i| i.script())
+            .collect();
+        assert!(
+            scripts.contains(&"cargo run --features 'cli'".to_string()),
+            "{scripts:?}"
+        );
+    }
+
+    #[test]
+    fn passes_required_features_of_a_named_binary() {
+        let manifest = format!(
+            "{PACKAGE}\n[features]\ncli = []\nextra = []\n\n\
+             [[bin]]\nname = \"a\"\npath = \"a.rs\"\nrequired-features = [\"cli\", \"extra\"]\n\n\
+             [[bin]]\nname = \"b\"\npath = \"b.rs\"\n"
+        );
+        let path = write_package("required-features-many", &manifest, &[]);
+        let scripts: Vec<String> = scan(&path)
+            .unwrap()
+            .items
+            .iter()
+            .filter_map(|i| i.script())
+            .collect();
+        assert!(
+            scripts.contains(&"cargo run --bin 'a' --features 'cli,extra'".to_string()),
+            "{scripts:?}"
+        );
+        assert!(
+            scripts.contains(&"cargo run --bin 'b'".to_string()),
+            "a target without required-features gets no flag: {scripts:?}"
         );
     }
 

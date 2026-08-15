@@ -51,7 +51,11 @@ pub fn discover(start_dir: &Path, enabled: &AutoLaunchers) -> Vec<LauncherGroup>
         let wrapper = find_up(start_dir, &["gradlew"]);
         let script = find_up(start_dir, &["build.gradle", "build.gradle.kts"]);
         if wrapper.is_some() || script.is_some() {
-            groups.extend(gradle::scan(wrapper.as_deref(), script.as_deref()));
+            groups.extend(gradle::scan(
+                wrapper.as_deref(),
+                script.as_deref(),
+                start_dir,
+            ));
         }
     }
 

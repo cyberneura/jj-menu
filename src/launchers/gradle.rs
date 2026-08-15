@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use super::LauncherGroup;
+use super::{LauncherGroup, in_dir};
 use crate::config::MenuItem;
 
 /// Lifecycle tasks present in essentially every Gradle build.
@@ -20,7 +20,16 @@ const TASKS: &[&str] = &["build", "test", "clean", "assemble", "check", "tasks"]
 /// multi-project build the wrapper sits at the root while the subproject has
 /// only its own build script, so the nearest of each can be in different
 /// directories.
-pub fn scan(wrapper: Option<&Path>, script: Option<&Path>) -> Option<LauncherGroup> {
+///
+/// `start_dir` is where the menu was opened. Gradle takes the project
+/// directory from the working directory, and a directory that is not part of
+/// the build is rejected, so the command is run from the directory holding the
+/// build script.
+pub fn scan(
+    wrapper: Option<&Path>,
+    script: Option<&Path>,
+    start_dir: &Path,
+) -> Option<LauncherGroup> {
     // The wrapper pins the Gradle version for the project, so use it when
     // available and fall back to a Gradle on PATH otherwise.
     let (runner, source) = match wrapper {
@@ -33,6 +42,12 @@ pub fn scan(wrapper: Option<&Path>, script: Option<&Path>) -> Option<LauncherGro
         }
     };
 
+    // The build script marks the project directory; without one, the wrapper's
+    // own directory is the root of the build.
+    let project_dir = script
+        .and_then(Path::parent)
+        .or_else(|| wrapper.and_then(Path::parent))?;
+
     let items = TASKS
         .iter()
         .map(|task| {
@@ -41,7 +56,8 @@ pub fn scan(wrapper: Option<&Path>, script: Option<&Path>) -> Option<LauncherGro
             } else {
                 format!("gradle {task}")
             };
-            MenuItem::command(label, format!("{runner} {task}"))
+            let command = in_dir(project_dir, &format!("{runner} {task}"), start_dir);
+            MenuItem::command(label, command)
         })
         .collect();
 
@@ -68,9 +84,12 @@ mod tests {
         let dir = tempdir("wrapper");
         let wrapper = dir.join("gradlew");
         fs::write(&wrapper, "#!/bin/sh\n").unwrap();
-        let group = scan(Some(&wrapper), None).unwrap();
+        let group = scan(Some(&wrapper), None, &dir).unwrap();
         assert_eq!(group.source, "gradlew");
-        assert!(group.items[0].script().unwrap().ends_with("gradlew' build"));
+        assert_eq!(
+            group.items[0].script().unwrap(),
+            format!("'{}' build", wrapper.display())
+        );
     }
 
     #[test]
@@ -78,7 +97,7 @@ mod tests {
         let dir = tempdir("no-wrapper");
         let script = dir.join("build.gradle");
         fs::write(&script, "").unwrap();
-        let group = scan(None, Some(&script)).unwrap();
+        let group = scan(None, Some(&script), &dir).unwrap();
         assert_eq!(group.source, "build.gradle");
         assert_eq!(group.items[0].script().unwrap(), "gradle build");
     }
@@ -95,7 +114,7 @@ mod tests {
         let script = sub.join("build.gradle");
         fs::write(&script, "").unwrap();
 
-        let group = scan(Some(&wrapper), Some(&script)).unwrap();
+        let group = scan(Some(&wrapper), Some(&script), &sub).unwrap();
         assert_eq!(group.source, "gradlew");
         assert_eq!(
             group.items[0].script().unwrap(),
@@ -104,7 +123,26 @@ mod tests {
     }
 
     #[test]
+    fn runs_from_the_project_directory_when_opened_further_down() {
+        // Gradle rejects a working directory that is not part of the build,
+        // so a `cd` to the project directory is required.
+        let root = tempdir("below-project");
+        let wrapper = root.join("gradlew");
+        fs::write(&wrapper, "#!/bin/sh\n").unwrap();
+        let script = root.join("build.gradle");
+        fs::write(&script, "").unwrap();
+        let deep = root.join("src/main/java");
+        fs::create_dir_all(&deep).unwrap();
+
+        let group = scan(Some(&wrapper), Some(&script), &deep).unwrap();
+        assert_eq!(
+            group.items[0].script().unwrap(),
+            format!("cd '{}' && '{}' build", root.display(), wrapper.display())
+        );
+    }
+
+    #[test]
     fn produces_nothing_without_a_wrapper_or_a_build_script() {
-        assert!(scan(None, None).is_none());
+        assert!(scan(None, None, Path::new("/tmp")).is_none());
     }
 }

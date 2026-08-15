@@ -112,7 +112,8 @@ merged, in that order.
 Any of these base names:
 
 ```
-.jj-menu   _jj-menu   jj-menu   .jj   _jj   jj   .jj.local   .jj-menu.local
+.jj-menu   _jj-menu   jj-menu
+.jj-menu.local   _jj-menu.local   jj-menu.local
 ```
 
 with any of these extensions:

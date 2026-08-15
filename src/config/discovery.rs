@@ -16,11 +16,9 @@ const PROJECT_STEMS: &[&str] = &[
     ".jj-menu",
     "_jj-menu",
     "jj-menu",
-    ".jj",
-    "_jj",
-    "jj",
-    ".jj.local",
     ".jj-menu.local",
+    "_jj-menu.local",
+    "jj-menu.local",
 ];
 
 /// Extensions accepted for a configuration file, in priority order.

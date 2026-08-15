@@ -18,7 +18,7 @@
 //! one it would have seen anyway.
 
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 /// The terminal settings from before raw mode, or null while the menu is not
 /// open. Read from a signal handler, so it is an atomic pointer to a leaked
@@ -35,6 +35,26 @@ static ORIGINAL: AtomicPtr<libc::termios> = AtomicPtr::new(ptr::null_mut());
 /// surfaces as an `EPIPE` error, and handling it here would turn
 /// `jj-menu --print | head` from a clean write error into a killed process.
 const TERMINATING: &[libc::c_int] = &[libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
+
+/// What each of `TERMINATING` was set to before the menu armed its handler,
+/// so that disarming puts back what was inherited rather than assuming the
+/// default. A shell running `trap '' TERM` passes its ignore down, and turning
+/// that into the default would change how the command the menu runs behaves.
+///
+/// `NOT_ARMED` marks a slot the menu did not take over.
+static INHERITED: [AtomicUsize; 4] = [
+    AtomicUsize::new(NOT_ARMED),
+    AtomicUsize::new(NOT_ARMED),
+    AtomicUsize::new(NOT_ARMED),
+    AtomicUsize::new(NOT_ARMED),
+];
+
+/// Not a possible `sighandler_t`: `SIG_DFL` is 0, `SIG_ERR` is -1, and a real
+/// handler is a function pointer.
+const NOT_ARMED: usize = 1;
+
+/// The two are indexed together, so adding a signal has to add a slot.
+const _: () = assert!(TERMINATING.len() == INHERITED.len());
 
 /// Capture the terminal state and arm the handlers.
 ///
@@ -66,10 +86,21 @@ pub fn arm_terminal_restore() {
         return;
     }
 
-    for &signal in TERMINATING {
+    for (slot, &signal) in TERMINATING.iter().enumerate() {
         // SAFETY: `restore` is a plain `extern "C"` function and uses only
         // async-signal-safe calls, which is what `signal` requires of it.
-        unsafe { libc::signal(signal, restore as *const () as libc::sighandler_t) };
+        // `signal` hands back the disposition it replaced.
+        let inherited = unsafe { libc::signal(signal, restore as *const () as libc::sighandler_t) };
+        if inherited == libc::SIG_IGN {
+            // The caller asked for this signal to be ignored, so it was never
+            // going to end the process and there is nothing to restore.
+            // Honouring that matters: the ignore is inherited by the command
+            // the menu runs.
+            // SAFETY: putting back the disposition just read.
+            unsafe { libc::signal(signal, libc::SIG_IGN) };
+            continue;
+        }
+        INHERITED[slot].store(inherited, Ordering::Release);
     }
 }
 
@@ -81,9 +112,14 @@ pub fn arm_terminal_restore() {
 /// leaked rather than freed, so a signal already on its way cannot read a
 /// dangling pointer.
 pub fn disarm_terminal_restore() {
-    for &signal in TERMINATING {
-        // SAFETY: restoring the disposition every one of these had at startup.
-        unsafe { libc::signal(signal, libc::SIG_DFL) };
+    for (slot, &signal) in TERMINATING.iter().enumerate() {
+        let inherited = INHERITED[slot].swap(NOT_ARMED, Ordering::AcqRel);
+        if inherited == NOT_ARMED {
+            continue;
+        }
+        // SAFETY: putting back the disposition that was read from this same
+        // signal while arming.
+        unsafe { libc::signal(signal, inherited) };
     }
     ORIGINAL.store(ptr::null_mut(), Ordering::Release);
 }
@@ -103,6 +139,8 @@ extern "C" fn restore(signal: libc::c_int) {
     // write is not worth handling here — the process is on its way out.
     unsafe {
         libc::write(libc::STDERR_FILENO, RESET.as_ptr().cast(), RESET.len());
+        // Die of this signal the way the process would have. A signal armed
+        // here was never inherited as ignored, so the default is what it had.
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);
     }

@@ -31,9 +31,18 @@ pub fn scan(path: &Path, start_dir: &Path) -> Option<LauncherGroup> {
     let items = targets
         .into_iter()
         .map(|target| {
+            // Quoting protects the shell, not make: a target named `-n` is
+            // still read as make's own dry-run flag. `--` ends the options,
+            // and is only added where it is needed so the common command
+            // stays the one you would have typed.
+            let options_end = if target.starts_with('-') { "-- " } else { "" };
             // A target name can hold shell metacharacters, and this one came
             // from a file in the repository rather than from the menu author.
-            let command = in_dir(dir, &format!("make {}", quote(&target)), start_dir);
+            let command = in_dir(
+                dir,
+                &format!("make {options_end}{}", quote(&target)),
+                start_dir,
+            );
             MenuItem::command(format!("make {target}"), command)
         })
         .collect();
@@ -55,9 +64,16 @@ pub fn scan(path: &Path, start_dir: &Path) -> Option<LauncherGroup> {
 ///   recipe prefix: a tab, or whatever `.RECIPEPREFIX` was last set to
 /// - the body of a `define`, which make does not read as makefile syntax
 ///   until the variable is expanded, so a `fake:` line in there is text
+/// - anything inside a conditional (`ifeq` ... `endif`). Which branch make
+///   takes depends on variables this cannot expand, so *both* are skipped:
+///   offering a rule from the branch that was not taken would be a menu entry
+///   that always fails, which is the one thing worth avoiding here
 fn parse_targets(text: &str) -> Vec<String> {
     let mut targets = Vec::new();
     let mut in_define = false;
+    // Nesting depth of `ifeq` / `ifdef` / ... blocks, whose contents are
+    // skipped entirely.
+    let mut conditional_depth = 0usize;
     // `.RECIPEPREFIX` applies from where it is set, so it is tracked while
     // reading rather than looked up once.
     let mut recipe_prefix = '\t';
@@ -66,6 +82,17 @@ fn parse_targets(text: &str) -> Vec<String> {
         let start = line.trim_start();
         if in_define {
             in_define = !start.starts_with("endef");
+            continue;
+        }
+        if is_conditional_start(start) {
+            conditional_depth += 1;
+            continue;
+        }
+        if start.starts_with("endif") {
+            conditional_depth = conditional_depth.saturating_sub(1);
+            continue;
+        }
+        if conditional_depth > 0 {
             continue;
         }
         let start = start
@@ -97,7 +124,9 @@ fn parse_targets(text: &str) -> Vec<String> {
         }
 
         for name in left.split_whitespace() {
-            if name.starts_with('.') || name.contains('%') || name.contains('$') {
+            // `a b &:` is one grouped rule building both a and b; the `&` is
+            // the marker, not a third target.
+            if name.starts_with('.') || name.contains('%') || name.contains('$') || name == "&" {
                 continue;
             }
             targets.push(name.to_string());
@@ -105,6 +134,21 @@ fn parse_targets(text: &str) -> Vec<String> {
     }
 
     targets
+}
+
+/// Whether this line opens a conditional block.
+///
+/// `else ifeq (...)` continues the block it is already in rather than opening
+/// a new one, so only the leading keyword counts.
+fn is_conditional_start(line: &str) -> bool {
+    ["ifeq", "ifneq", "ifdef", "ifndef"]
+        .iter()
+        .any(|keyword| match line.strip_prefix(keyword) {
+            // `ifeq(a,b)` with no space is valid, so the next character only
+            // has to not continue the word.
+            Some(rest) => !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'),
+            None => false,
+        })
 }
 
 /// The recipe prefix a `.RECIPEPREFIX` assignment sets, if this line is one.
@@ -174,6 +218,54 @@ mod tests {
     fn an_empty_recipe_prefix_assignment_restores_the_tab() {
         let targets = parse_targets(".RECIPEPREFIX = >\n.RECIPEPREFIX =\nbuild:\n\tfake:\n");
         assert_eq!(targets, vec!["build"]);
+    }
+
+    #[test]
+    fn skips_rules_inside_a_conditional() {
+        // Which branch make takes depends on variables this cannot expand, so
+        // neither branch is advertised.
+        let targets = parse_targets("build:\n\ttrue\nifeq (1,0)\ninactive:\n\ttrue\nendif\n");
+        assert_eq!(targets, vec!["build"]);
+    }
+
+    #[test]
+    fn skips_both_arms_of_a_conditional_and_resumes_after_it() {
+        let targets = parse_targets(
+            "ifdef DEBUG\ndebug:\n\ttrue\nelse\nrelease:\n\ttrue\nendif\nafter:\n\ttrue\n",
+        );
+        assert_eq!(targets, vec!["after"]);
+    }
+
+    #[test]
+    fn a_target_named_like_a_conditional_keyword_is_still_a_target() {
+        // `ifeq` only opens a block when it is the keyword, not when it is the
+        // start of a longer name.
+        let targets = parse_targets("ifeqx:\n\ttrue\n");
+        assert_eq!(targets, vec!["ifeqx"]);
+    }
+
+    #[test]
+    fn drops_the_grouped_target_marker() {
+        // `a b &:` builds both a and b in one rule; `&` is not a target.
+        assert_eq!(parse_targets("a b &:\n\ttrue\n"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ends_the_options_for_a_target_that_looks_like_a_flag() {
+        // Quoting stops the shell, not make: bare `make '-n'` is a dry run.
+        let dir = std::env::temp_dir().join("jj-menu-make-dash");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Makefile");
+        std::fs::write(&path, "-n:\n\ttrue\nbuild:\n\ttrue\n").unwrap();
+
+        let group = scan(&path, &dir).unwrap();
+        let scripts: Vec<String> = group
+            .items
+            .iter()
+            .map(|i| i.script().unwrap().to_string())
+            .collect();
+        assert_eq!(scripts, ["make -- '-n'", "make 'build'"]);
     }
 
     #[test]

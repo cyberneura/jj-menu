@@ -25,8 +25,14 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
     let mut names: Vec<&String> = scripts.keys().collect();
     names.sort();
 
-    let items = names
+    let items: Vec<MenuItem> = names
         .into_iter()
+        // A name starting with `-` is parsed as an option by every one of
+        // these runners, whatever the shell does with it: `npm run --silent`
+        // is npm's own flag and exits without running the script. None of them
+        // has a way to say "this is a script name", so the entry is left out
+        // rather than offered as one that quietly does nothing.
+        .filter(|name| !name.starts_with('-'))
         .map(|name| {
             // A script name is an arbitrary JSON key, so it can contain shell
             // metacharacters. Quoting keeps `build; rm -rf /` a single
@@ -37,6 +43,9 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
             )
         })
         .collect();
+    if items.is_empty() {
+        return None;
+    }
 
     Some(LauncherGroup {
         source: "package.json".to_string(),
@@ -112,6 +121,31 @@ mod tests {
         let group = scan(&path).unwrap();
         let labels: Vec<String> = group.items.iter().map(|i| i.label()).collect();
         assert_eq!(labels, vec!["npm run build", "npm run test"]);
+    }
+
+    #[test]
+    fn skips_a_script_whose_name_would_be_read_as_an_option() {
+        // `npm run --silent` is npm's own flag: it exits 0 without running
+        // the script, and no runner has a way to say "this is a name".
+        let dir = tempdir("option-like");
+        let path = dir.join("package.json");
+        fs::write(
+            &path,
+            r#"{"scripts": {"--silent": "echo hi", "build": "vite build"}}"#,
+        )
+        .unwrap();
+
+        let group = scan(&path).unwrap();
+        let labels: Vec<String> = group.items.iter().map(|i| i.label()).collect();
+        assert_eq!(labels, vec!["npm run build"]);
+    }
+
+    #[test]
+    fn produces_nothing_when_every_script_is_option_like() {
+        let dir = tempdir("all-option-like");
+        let path = dir.join("package.json");
+        fs::write(&path, r#"{"scripts": {"--silent": "echo hi"}}"#).unwrap();
+        assert!(scan(&path).is_none());
     }
 
     #[test]

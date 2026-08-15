@@ -49,7 +49,6 @@ const JVM_PLUGINS: &[&str] = &[
     "groovy",
     "scala",
     "war",
-    "ear",
     "application",
     "org.jetbrains.kotlin.jvm",
     "org.jetbrains.kotlin.android",
@@ -65,6 +64,8 @@ const JVM_PLUGINS: &[&str] = &[
 const BASE_PLUGINS: &[&str] = &[
     "base",
     "distribution",
+    // The Ear plugin applies Base, not Java, so there is no `test`.
+    "ear",
     "cpp-application",
     "cpp-library",
     "swift-application",
@@ -110,10 +111,18 @@ pub fn scan(
     // A subproject usually gets its plugins from the root, so the root build
     // script counts too — but only what it applies to every project. A plugin
     // the root applies to itself says nothing about the subproject.
-    let inherited = wrapper
+    //
+    // The settings file is what marks the root of a build, and it is there
+    // whether or not the build ships a wrapper. Its own directory is the
+    // fallback for the malformed case of a wrapper with no settings file.
+    let root_dir = super::find_up(start_dir, &["settings.gradle", "settings.gradle.kts"])
+        .as_deref()
         .and_then(Path::parent)
-        .filter(|dir| Some(*dir) != script.and_then(Path::parent))
-        .and_then(root_script)
+        .map(Path::to_path_buf)
+        .or_else(|| wrapper.and_then(Path::parent).map(Path::to_path_buf));
+    let inherited = root_dir
+        .filter(|dir| Some(dir.as_path()) != script.and_then(Path::parent))
+        .and_then(|dir| root_script(&dir))
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|text| capabilities_of(&text, Scope::Shared))
         .unwrap_or_default();
@@ -216,12 +225,14 @@ fn applied_plugins(text: &str, scope: Scope) -> Vec<String> {
     let mut plugins = Vec::new();
 
     let mut depth = 0usize;
-    // The depth at which the innermost enclosing `allprojects` /
-    // `subprojects` block was opened, while inside one.
+    // The depths at which the innermost enclosing `allprojects` /
+    // `subprojects` and `plugins` blocks were opened, while inside one.
     let mut shared_from: Option<usize> = None;
-    // Set by `allprojects` / `subprojects`, and only honoured when the very
-    // next token opens a block — `println("subprojects")` must not count.
+    let mut plugins_from: Option<usize> = None;
+    // Set by the word naming a block, and only honoured when the very next
+    // token opens one — `println("subprojects")` must not count.
     let mut opens_shared = false;
+    let mut opens_plugins = false;
 
     for (index, token) in tokens.iter().enumerate() {
         match token {
@@ -230,24 +241,33 @@ fn applied_plugins(text: &str, scope: Scope) -> Vec<String> {
                 if opens_shared && shared_from.is_none() {
                     shared_from = Some(depth);
                 }
+                if opens_plugins && plugins_from.is_none() {
+                    plugins_from = Some(depth);
+                }
             }
             Token::Symbol('}') => {
                 if shared_from == Some(depth) {
                     shared_from = None;
+                }
+                if plugins_from == Some(depth) {
+                    plugins_from = None;
                 }
                 depth = depth.saturating_sub(1);
             }
             _ => {}
         }
         opens_shared = matches!(token, Token::Word("allprojects" | "subprojects"));
+        opens_plugins = matches!(token, Token::Word("plugins"));
 
         if scope == Scope::Shared && shared_from.is_none() {
             continue;
         }
         let rest = &tokens[index + 1..];
         let (id, rest) = match token {
-            // `id 'java'`, `id("java")`
-            Token::Word("id") => match argument(rest, &['(']) {
+            // `id 'java'`, `id("java")`. Only inside a `plugins` block: `id`
+            // is an ordinary name elsewhere, and a build defining its own
+            // `id` closure must not be read as applying a plugin.
+            Token::Word("id") if plugins_from.is_some() => match argument(rest, &['(']) {
                 Some((id, rest)) => (id.to_string(), rest),
                 None => continue,
             },
@@ -258,8 +278,9 @@ fn applied_plugins(text: &str, scope: Scope) -> Vec<String> {
                 Some((id, rest)) => (id.to_string(), rest),
                 None => continue,
             },
-            // `kotlin("jvm")` is shorthand for the qualified plugin id.
-            Token::Word("kotlin") => match argument(rest, &['(']) {
+            // `kotlin("jvm")` is shorthand for the qualified plugin id, and
+            // is likewise only a declaration inside a `plugins` block.
+            Token::Word("kotlin") if plugins_from.is_some() => match argument(rest, &['(']) {
                 Some((id, rest)) => (format!("org.jetbrains.kotlin.{id}"), rest),
                 None => continue,
             },
@@ -616,6 +637,26 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_root_through_the_settings_file_without_a_wrapper() {
+        // A multi-project build using a Gradle on PATH still has a settings
+        // file marking its root, which is where the shared plugins are.
+        let root = tempdir("settings-root");
+        fs::write(root.join("settings.gradle"), "include 'app'\n").unwrap();
+        fs::write(
+            root.join("build.gradle"),
+            "subprojects {\n    apply plugin: 'java'\n}\n",
+        )
+        .unwrap();
+        let sub = root.join("app");
+        fs::create_dir_all(&sub).unwrap();
+        let script = sub.join("build.gradle");
+        fs::write(&script, "dependencies {\n}\n").unwrap();
+
+        let group = scan(None, Some(&script), &sub).unwrap();
+        assert!(labels(&group).contains(&"gradle test".to_string()));
+    }
+
+    #[test]
     fn does_not_take_a_string_named_subprojects_for_a_shared_block() {
         // Only a real `subprojects { ... }` block configures the subprojects.
         let root = tempdir("named-subprojects");
@@ -692,6 +733,28 @@ mod tests {
 
         let group = scan(Some(&wrapper), Some(&script), &sub).unwrap();
         assert_eq!(labels(&group), vec!["./gradlew tasks"]);
+    }
+
+    #[test]
+    fn ignores_an_id_call_outside_a_plugins_block() {
+        // A build is free to define its own `id` function; calling it is not
+        // a plugin declaration.
+        let dir = tempdir("own-id");
+        let script = dir.join("build.gradle");
+        fs::write(&script, "def id = { value -> }\nid('java')\n").unwrap();
+        assert_eq!(
+            labels(&scan(None, Some(&script), &dir).unwrap()),
+            vec!["gradle tasks"]
+        );
+    }
+
+    #[test]
+    fn takes_an_apply_plugin_call_outside_a_plugins_block() {
+        // Unlike `id`, `apply plugin:` really does apply from anywhere.
+        let dir = tempdir("apply-anywhere");
+        let script = dir.join("build.gradle");
+        fs::write(&script, "apply plugin: 'java'\n").unwrap();
+        assert!(labels(&scan(None, Some(&script), &dir).unwrap()).contains(&"gradle test".into()));
     }
 
     #[test]

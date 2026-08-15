@@ -92,6 +92,13 @@ fn scan_with(path: &Path, is_installed: impl Fn(&str) -> bool + Sync) -> Option<
 /// reads `.cargo/config.toml` from the working directory upwards and an
 /// `[alias]` there can point `fmt` at any other Cargo command. Opening a menu
 /// inside a repository must not run something the repository chose.
+///
+/// That answers for the default toolchain, so a repository pinning a
+/// different one through `rust-toolchain.toml` can still be told wrong. It is
+/// the better trade: honouring the pin means either letting the repository's
+/// Cargo configuration take effect, or handing the pinned name to rustup,
+/// which installs a missing toolchain on the spot — a menu keystroke must not
+/// start a download.
 fn is_installed(command: &str) -> bool {
     Command::new("cargo")
         .arg(command)

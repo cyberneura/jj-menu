@@ -52,11 +52,27 @@ pub fn scan(path: &Path, start_dir: &Path) -> Option<LauncherGroup> {
 /// - pattern rules (`%.o: %.c`) — need a concrete file name
 /// - names built from variables (`$(BIN): ...`) — the value is unknown here
 /// - variable assignments (`CC := gcc`) and recipe lines (indented with a tab)
+/// - the body of a `define`, which make does not read as makefile syntax
+///   until the variable is expanded, so a `fake:` line in there is text
 fn parse_targets(text: &str) -> Vec<String> {
     let mut targets = Vec::new();
+    let mut in_define = false;
 
     for line in text.lines() {
-        if line.starts_with('\t') || line.trim_start().starts_with('#') {
+        let start = line.trim_start();
+        if in_define {
+            in_define = !start.starts_with("endef");
+            continue;
+        }
+        let start = start
+            .strip_prefix("override ")
+            .unwrap_or(start)
+            .trim_start();
+        if start.starts_with("define ") || start == "define" {
+            in_define = true;
+            continue;
+        }
+        if line.starts_with('\t') || start.starts_with('#') {
             continue;
         }
         let Some((left, right)) = line.split_once(':') else {
@@ -104,6 +120,20 @@ mod tests {
             parse_targets(".PHONY: build\nbuild:\n\ttrue\n"),
             vec!["build"]
         );
+    }
+
+    #[test]
+    fn skips_the_body_of_a_define() {
+        // make does not read a `define` body as makefile syntax until the
+        // variable is expanded, so a colon in there is not a rule.
+        let targets = parse_targets("define recipe\nfake:\n\techo hi\nendef\n\nbuild:\n\ttrue\n");
+        assert_eq!(targets, vec!["build"]);
+    }
+
+    #[test]
+    fn skips_the_body_of_an_assigning_or_overridden_define() {
+        let targets = parse_targets("override define recipe :=\nfake:\nendef\nbuild:\n\ttrue\n");
+        assert_eq!(targets, vec!["build"]);
     }
 
     #[test]

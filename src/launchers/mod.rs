@@ -42,10 +42,17 @@ pub fn discover(start_dir: &Path, enabled: &AutoLaunchers) -> Vec<LauncherGroup>
     {
         groups.extend(cargo::scan(&path));
     }
-    if enabled.gradle()
-        && let Some(path) = find_up(start_dir, &["gradlew", "build.gradle", "build.gradle.kts"])
-    {
-        groups.extend(gradle::scan(&path));
+    if enabled.gradle() {
+        // The wrapper is looked up separately from the build script: in a
+        // multi-project build `gradlew` lives at the root while the
+        // subproject only has its own `build.gradle`. A combined search would
+        // stop at the subproject and fall back to a global `gradle`, which
+        // fails on wrapper-only setups.
+        let wrapper = find_up(start_dir, &["gradlew"]);
+        let script = find_up(start_dir, &["build.gradle", "build.gradle.kts"]);
+        if wrapper.is_some() || script.is_some() {
+            groups.extend(gradle::scan(wrapper.as_deref(), script.as_deref()));
+        }
     }
 
     groups

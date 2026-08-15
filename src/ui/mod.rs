@@ -314,15 +314,31 @@ fn cursor_marker(selected: bool) -> &'static str {
 
 /// Cut a line to the terminal width, counting characters rather than bytes.
 ///
+/// Control characters are removed first: labels can come from a file in the
+/// checkout (an npm script name, a make target), and a JSON string can carry a
+/// real ESC or newline. Writing those straight out would let merely *opening*
+/// the menu in an untrusted repository run terminal escape sequences — OSC
+/// clipboard writes, cursor moves — without anything being selected.
+///
 /// This is not display-width aware: a wide character (CJK, emoji) counts as
 /// one, so a line of wide characters is cut later than it ideally would be.
 /// Erring on the side of cutting late keeps ASCII, the common case, exact.
 fn truncate(text: &str, cols: u16) -> String {
     let max = cols.saturating_sub(1) as usize;
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    text.chars().take(max).collect()
+    sanitize(text).take(max).collect()
+}
+
+/// Replace every control character with `·` so it cannot reach the terminal
+/// as a command. C1 (`U+0080`–`U+009F`) counts too: in a UTF-8 terminal those
+/// are alternative forms of the C0 escape sequences.
+fn sanitize(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().map(|c| {
+        if c.is_control() || ('\u{80}'..='\u{9f}').contains(&c) {
+            '·'
+        } else {
+            c
+        }
+    })
 }
 
 fn pad(text: &str, cols: u16) -> String {
@@ -352,6 +368,17 @@ mod tests {
         assert_eq!(truncate("abcdef", 4), "abc");
         assert_eq!(truncate("abc", 80), "abc");
         assert_eq!(truncate("日本語です", 4), "日本語");
+    }
+
+    #[test]
+    fn strips_control_characters_from_repository_controlled_text() {
+        // An npm script name or make target can carry a real ESC; none of it
+        // may reach the terminal as a command.
+        assert_eq!(truncate("a\u{1b}[2Jb", 80), "a·[2Jb");
+        assert_eq!(truncate("a\nb", 80), "a·b");
+        assert_eq!(truncate("a\u{7}b", 80), "a·b");
+        assert_eq!(truncate("a\u{9b}b", 80), "a·b", "C1 CSI must go too");
+        assert_eq!(truncate("plain", 80), "plain", "ordinary text is untouched");
     }
 
     #[test]

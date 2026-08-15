@@ -27,12 +27,13 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
 
     // `cargo run` is only offered when it can actually resolve a target:
     //
-    // - a virtual workspace (no `[package]`) has nothing to run
-    // - several `[[bin]]` targets make a bare `cargo run` ambiguous, so name
-    //   each one instead
-    let bins = binary_names(&manifest);
-    if manifest.get("package").is_some() {
-        if bins.len() > 1 {
+    // - a virtual workspace or a library-only package has nothing to run
+    // - two or more binaries make a bare `cargo run` ambiguous, so name each
+    let bins = binary_targets(&manifest, path.parent());
+    match bins.len() {
+        0 => {}
+        1 => items.push(MenuItem::command("cargo run", "cargo run")),
+        _ => {
             for bin in bins {
                 // The name comes from a manifest in the repository, so quote
                 // it for the same reason npm script names are quoted.
@@ -41,8 +42,6 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
                     format!("cargo run --bin {}", quote(&bin)),
                 ));
             }
-        } else {
-            items.push(MenuItem::command("cargo run", "cargo run"));
         }
     }
 
@@ -52,9 +51,20 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
     })
 }
 
-/// Names of the `[[bin]]` targets declared in the manifest.
-fn binary_names(manifest: &toml::Value) -> Vec<String> {
-    manifest
+/// Every binary Cargo would see for this manifest.
+///
+/// Counting only `[[bin]]` is not enough: Cargo also auto-discovers
+/// `src/main.rs` and `src/bin/*.rs`. Missing those makes a library-only
+/// package look runnable, and makes a package with `src/main.rs` plus one
+/// `[[bin]]` look unambiguous when it is not.
+///
+/// A virtual workspace (no `[package]`) has no targets of its own.
+fn binary_targets(manifest: &toml::Value, dir: Option<&Path>) -> Vec<String> {
+    if manifest.get("package").is_none() {
+        return Vec::new();
+    }
+
+    let mut names: Vec<String> = manifest
         .get("bin")
         .and_then(|b| b.as_array())
         .map(|bins| {
@@ -62,7 +72,51 @@ fn binary_names(manifest: &toml::Value) -> Vec<String> {
                 .filter_map(|b| b.get("name")?.as_str().map(str::to_string))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // `autobins = false` turns the auto-discovery off.
+    let autobins = manifest
+        .get("package")
+        .and_then(|p| p.get("autobins"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let Some(dir) = dir.filter(|_| autobins) else {
+        return names;
+    };
+
+    // The implicit binary is named after the package.
+    if dir.join("src/main.rs").is_file()
+        && let Some(name) = manifest
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|v| v.as_str())
+        && !names.iter().any(|n| n == name)
+    {
+        names.push(name.to_string());
+    }
+
+    // `src/bin/foo.rs` and `src/bin/foo/main.rs` are binaries named `foo`.
+    if let Ok(entries) = std::fs::read_dir(dir.join("src/bin")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = if path.is_dir() && path.join("main.rs").is_file() {
+                path.file_name().map(|n| n.to_string_lossy().into_owned())
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                path.file_stem().map(|n| n.to_string_lossy().into_owned())
+            } else {
+                None
+            };
+            if let Some(name) = name
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+
+    // Directory order is filesystem-dependent; sort for a stable menu.
+    names.sort();
+    names
 }
 
 #[cfg(test)]
@@ -79,6 +133,20 @@ mod tests {
         path
     }
 
+    /// A manifest plus the source files Cargo would auto-discover.
+    fn write_package(name: &str, body: &str, sources: &[&str]) -> std::path::PathBuf {
+        let path = write_manifest(name, body);
+        let dir = path.parent().unwrap();
+        for source in sources {
+            let file = dir.join(source);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "fn main() {}").unwrap();
+        }
+        path
+    }
+
+    const PACKAGE: &str = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
+
     fn labels(path: &std::path::Path) -> Vec<String> {
         scan(path)
             .unwrap()
@@ -90,7 +158,7 @@ mod tests {
 
     #[test]
     fn offers_the_standard_subcommands() {
-        let path = write_manifest("basic", "[package]\nname = \"x\"\nversion = \"0.1.0\"\n");
+        let path = write_package("basic", PACKAGE, &["src/main.rs"]);
         let labels = labels(&path);
         assert!(labels.contains(&"cargo build".to_string()));
         assert!(labels.contains(&"cargo test".to_string()));
@@ -101,6 +169,55 @@ mod tests {
     fn omits_run_for_a_virtual_workspace_where_it_cannot_resolve_a_target() {
         let path = write_manifest("virtual", "[workspace]\nmembers = [\"a\"]\n");
         assert!(!labels(&path).iter().any(|l| l.starts_with("cargo run")));
+    }
+
+    #[test]
+    fn omits_run_for_a_library_only_package() {
+        // No `src/main.rs`, no `src/bin/`, no `[[bin]]`: `cargo run` would
+        // fail with "a bin target must be available".
+        let path = write_package("lib-only", PACKAGE, &["src/lib.rs"]);
+        assert!(!labels(&path).iter().any(|l| l.starts_with("cargo run")));
+    }
+
+    #[test]
+    fn counts_the_implicit_binary_from_src_main_rs() {
+        // `src/main.rs` plus one `[[bin]]` is two binaries, so a bare
+        // `cargo run` would be ambiguous even though `bin` has one entry.
+        let manifest = format!("{PACKAGE}\n[[bin]]\nname = \"other\"\npath = \"other.rs\"\n");
+        let path = write_package("implicit-main", &manifest, &["src/main.rs"]);
+        let labels = labels(&path);
+        assert!(!labels.contains(&"cargo run".to_string()), "{labels:?}");
+        assert!(
+            labels.contains(&"cargo run --bin x".to_string()),
+            "{labels:?}"
+        );
+        assert!(
+            labels.contains(&"cargo run --bin other".to_string()),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn counts_binaries_auto_discovered_from_src_bin() {
+        let path = write_package("src-bin", PACKAGE, &["src/bin/a.rs", "src/bin/b/main.rs"]);
+        let labels = labels(&path);
+        assert!(
+            labels.contains(&"cargo run --bin a".to_string()),
+            "{labels:?}"
+        );
+        assert!(
+            labels.contains(&"cargo run --bin b".to_string()),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn honours_autobins_false() {
+        let manifest = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nautobins = false\n\n\
+             [[bin]]\nname = \"only\"\npath = \"only.rs\"\n";
+        let path = write_package("autobins-off", manifest, &["src/main.rs"]);
+        let labels = labels(&path);
+        assert!(labels.contains(&"cargo run".to_string()), "{labels:?}");
     }
 
     #[test]

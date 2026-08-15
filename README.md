@@ -223,8 +223,8 @@ for project files in the current directory and its ancestors.
 | --- | --- |
 | `package.json` | Every `scripts` entry, run with the package manager implied by the nearest lock file — searched upwards, stopping at the repository root or your home directory (pnpm, yarn, bun, npm; npm if none is found) |
 | `Makefile` | Every target that can run without extra arguments |
-| `Cargo.toml` | `build`, `test`, `check`, `fmt`, `clippy`, and `run` — named per binary when there are several, omitted when there is none, and carrying `--features` for a target with `required-features` |
-| Gradle | `build`, `test`, `clean`, `assemble`, `check`, `tasks`, using `./gradlew` when present — the wrapper is looked up separately from the build script, so a root wrapper is used for a subproject |
+| `Cargo.toml` | `build`, `test`, `check`, and `run` — named per binary when there are several, omitted when there is none, and carrying `--features` for a target with `required-features` — plus `fmt` and `clippy` when those components are installed |
+| Gradle | `tasks`, plus the lifecycle tasks (`build`, `clean`, `assemble`, `check`, and `test`) that the plugins declared by the build script define, using `./gradlew` when present — the wrapper is looked up separately from the build script, so a root wrapper is used for a subproject |
 
 In a Node project with no jj-menu file, `jj` is therefore just a list of npm
 scripts.
@@ -241,14 +241,23 @@ fails is worse than a missing one:
   (`$(BIN):`) are skipped — they need a concrete file name that only you know.
 - **Gradle**: the real task list can only be obtained by running
   `./gradlew tasks`, which starts a JVM and evaluates the build script. That is
-  far too slow to do while opening a menu, so a fixed set of lifecycle tasks is
-  offered, plus a `tasks` entry to discover the rest.
+  far too slow to do while opening a menu, so the tasks are inferred from the
+  plugins the build script applies — for a subproject, the root's
+  `allprojects` and `subprojects` blocks count as well, since that is where a
+  multi-project build usually applies them. A plugin listed with `apply false`
+  does not, and neither does one referenced through a version catalog
+  (`alias(libs.plugins.foo)`), since the id behind the alias lives in
+  `libs.versions.toml`. A build with nothing recognisable has no lifecycle
+  tasks to offer — `build` there silently runs the unrelated
+  `buildEnvironment` — so it gets only the `tasks` entry to discover the rest.
 - **Cargo**: `cargo run` is omitted when the package has no binary at all (a
   virtual workspace, or a library-only package) and replaced by one
   `cargo run --bin ...` per target when there are several, because a bare
   `cargo run` would be ambiguous. Binaries auto-discovered from `src/main.rs`
   and `src/bin/` are counted, and `required-features` is passed through as
-  `--features`.
+  `--features`. `fmt` and `clippy` are offered only once the component behind
+  them answers, because rustup installs the shim for both whether or not the
+  component is there.
 - **Gradle**: commands are run from the directory holding the build script.
   Gradle takes the project directory from the working directory and rejects one
   that is not part of the build, so opening the menu in, say, `src/main/java`

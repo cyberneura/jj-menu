@@ -1,27 +1,53 @@
 //! Entries for a Cargo project.
 //!
 //! Cargo finds the manifest itself, so the commands need no `cd` prefix.
-//! Only subcommands that ship with a normal Rust toolchain are offered; a
-//! `cargo clippy` entry that fails because the component is missing would be
-//! worse than no entry at all, so it is included only when the manifest is a
-//! real package (workspace roots without a package still get the basics).
+//! A `cargo clippy` entry that fails because the component is missing would be
+//! worse than no entry at all, so the subcommands that ship as optional
+//! toolchain components are offered only once they are known to be installed.
 
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use super::{LauncherGroup, quote};
 use crate::config::MenuItem;
 
-/// Subcommands that work for any manifest, package or virtual workspace.
-const COMMANDS: &[&str] = &["build", "test", "check", "fmt", "clippy"];
+/// Subcommands built into Cargo, available for any manifest.
+const BUILTIN_COMMANDS: &[&str] = &["build", "test", "check"];
+
+/// Subcommands provided by optional toolchain components (`rustfmt`,
+/// `clippy`), which a minimal rustup installation leaves out.
+const OPTIONAL_COMMANDS: &[&str] = &["fmt", "clippy"];
 
 /// Produce the standard Cargo entries, plus one `cargo run --bin` per extra
 /// binary target declared in the manifest.
 pub fn scan(path: &Path) -> Option<LauncherGroup> {
+    scan_with(path, is_installed)
+}
+
+/// `scan` with the availability check injected, so the tests do not depend on
+/// which components the toolchain running them happens to have.
+fn scan_with(path: &Path, is_installed: impl Fn(&str) -> bool + Sync) -> Option<LauncherGroup> {
     let text = std::fs::read_to_string(path).ok()?;
     let manifest: toml::Value = toml::from_str(&text).ok()?;
 
-    let mut items: Vec<MenuItem> = COMMANDS
+    // The checks are independent and each costs a process, so they overlap
+    // rather than adding up while the menu is opening.
+    let installed: Vec<&str> = std::thread::scope(|scope| {
+        let is_installed = &is_installed;
+        let probes: Vec<_> = OPTIONAL_COMMANDS
+            .iter()
+            .map(|&command| (command, scope.spawn(move || is_installed(command))))
+            .collect();
+        probes
+            .into_iter()
+            .filter_map(|(command, probe)| probe.join().unwrap_or(false).then_some(command))
+            .collect()
+    });
+
+    let mut items: Vec<MenuItem> = BUILTIN_COMMANDS
         .iter()
+        .copied()
+        .chain(installed)
         .map(|c| MenuItem::command(format!("cargo {c}"), format!("cargo {c}")))
         .collect();
 
@@ -52,6 +78,30 @@ pub fn scan(path: &Path) -> Option<LauncherGroup> {
         source: "Cargo.toml".to_string(),
         items,
     })
+}
+
+/// Whether `cargo <command>` can actually run.
+///
+/// `cargo --list` is not enough to tell: rustup ships a `cargo-fmt` and a
+/// `cargo-clippy` shim with every toolchain, so both are listed even when the
+/// component behind them is missing and the command fails on use. Running the
+/// shim is what settles it, and `--version` is the cheapest way to do that —
+/// it builds nothing and does not even read the manifest.
+///
+/// It runs from the filesystem root rather than the project, because Cargo
+/// reads `.cargo/config.toml` from the working directory upwards and an
+/// `[alias]` there can point `fmt` at any other Cargo command. Opening a menu
+/// inside a repository must not run something the repository chose.
+fn is_installed(command: &str) -> bool {
+    Command::new("cargo")
+        .arg(command)
+        .arg("--version")
+        .current_dir(Path::new("/"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// A binary target Cargo can run.
@@ -229,8 +279,17 @@ mod tests {
 
     const PACKAGE: &str = "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
 
+    /// Labels as seen on a toolchain with every optional component installed,
+    /// so the tests below do not depend on the one running them.
     fn labels(path: &std::path::Path) -> Vec<String> {
-        scan(path)
+        labels_with(path, |_| true)
+    }
+
+    fn labels_with(
+        path: &std::path::Path,
+        is_installed: impl Fn(&str) -> bool + Sync,
+    ) -> Vec<String> {
+        scan_with(path, is_installed)
             .unwrap()
             .items
             .iter()
@@ -245,6 +304,23 @@ mod tests {
         assert!(labels.contains(&"cargo build".to_string()));
         assert!(labels.contains(&"cargo test".to_string()));
         assert!(labels.contains(&"cargo run".to_string()));
+    }
+
+    #[test]
+    fn offers_the_optional_subcommands_only_when_they_are_installed() {
+        let path = write_package("optional", PACKAGE, &["src/main.rs"]);
+
+        let all = labels_with(&path, |_| true);
+        assert!(all.contains(&"cargo fmt".to_string()));
+        assert!(all.contains(&"cargo clippy".to_string()));
+
+        // A minimal rustup toolchain: the shims exist, the components do not.
+        let minimal = labels_with(&path, |_| false);
+        assert!(!minimal.contains(&"cargo fmt".to_string()));
+        assert!(!minimal.contains(&"cargo clippy".to_string()));
+        // The built-in subcommands are never gated.
+        assert!(minimal.contains(&"cargo build".to_string()));
+        assert!(minimal.contains(&"cargo check".to_string()));
     }
 
     #[test]

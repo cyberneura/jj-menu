@@ -11,6 +11,7 @@
 //! palette.
 
 use std::env;
+use std::ffi::OsStr;
 use std::io::{Result, Write};
 use std::sync::OnceLock;
 
@@ -131,8 +132,11 @@ pub fn paint_with(color: bool, out: &mut impl Write, style: Style, text: &str) -
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
+        // `var_os`, not `var`: only the length of `NO_COLOR` matters, and a
+        // value that is not UTF-8 would come back as an error from `var` and
+        // be taken for "not set" — the opposite of what it asks for.
         decide(
-            env::var("NO_COLOR").ok().as_deref(),
+            env::var_os("NO_COLOR").as_deref(),
             env::var("TERM").ok().as_deref(),
         )
     })
@@ -146,7 +150,7 @@ pub fn enabled() -> bool {
 /// There is no TTY check here — whoever calls [`paint`] owns that. The menu is
 /// only drawn once stderr is known to be a terminal, and the error path in
 /// `main` tests `is_terminal()` itself.
-fn decide(no_color: Option<&str>, term: Option<&str>) -> bool {
+fn decide(no_color: Option<&OsStr>, term: Option<&str>) -> bool {
     if no_color.is_some_and(|value| !value.is_empty()) {
         return false;
     }
@@ -159,14 +163,24 @@ mod tests {
 
     #[test]
     fn no_color_wins_over_everything() {
-        assert!(!decide(Some("1"), Some("xterm-256color")));
-        assert!(!decide(Some("anything"), None));
+        assert!(!decide(Some(OsStr::new("1")), Some("xterm-256color")));
+        assert!(!decide(Some(OsStr::new("anything")), None));
     }
 
     #[test]
     fn an_empty_no_color_is_not_a_request_for_no_color() {
         // The convention is "present and not an empty string".
-        assert!(decide(Some(""), Some("xterm-256color")));
+        assert!(decide(Some(OsStr::new("")), Some("xterm-256color")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_no_color_that_is_not_utf8_still_counts() {
+        // Reading it with `var` would turn this into an error, and an error
+        // into "not set" — colour would stay on although it was asked off.
+        use std::os::unix::ffi::OsStrExt;
+        let value = OsStr::from_bytes(&[0xff]);
+        assert!(!decide(Some(value), Some("xterm-256color")));
     }
 
     #[test]

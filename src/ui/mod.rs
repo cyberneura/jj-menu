@@ -6,17 +6,19 @@
 
 pub mod prompt;
 pub mod state;
+pub mod theme;
 
 use std::collections::HashMap;
 use std::io::{Write, stderr};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::{cursor, execute, style, terminal};
+use crossterm::{cursor, execute, terminal};
 
 use crate::config::MenuItem;
 use prompt::LineEditor;
 use state::{Frame, MenuState};
+use theme::{Style, paint_with};
 
 /// What the user picked.
 pub enum Outcome {
@@ -211,32 +213,59 @@ const CHROME_ROWS: u16 = 3;
 
 fn draw(menu: &mut MenuState) -> Result<()> {
     let (cols, rows) = terminal_size();
+    let frame = render(menu, cols, rows, theme::enabled())?;
+    flush(&frame)
+}
+
+/// Build one frame. Separate from [`draw`] so it can be rendered and inspected
+/// without a terminal.
+///
+/// `color` is passed in rather than read inside: [`theme::enabled`] is decided
+/// once per process, so a test could otherwise only ever see one of the two
+/// modes — and the fallback for the other one is exactly what needs guarding.
+fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec<u8>> {
     let help_rows = menu.frame().help.as_ref().map_or(0, |_| 2);
     let list_height = rows.saturating_sub(CHROME_ROWS + help_rows).max(1) as usize;
     menu.scroll_into_view(list_height);
 
-    let mut out = stderr();
+    // The whole frame is built in memory and written once. `stderr` is
+    // unbuffered, so painting straight to it would turn every colour change
+    // into its own write, and a redraw of a full screen into hundreds of them
+    // — visibly torn over a slow link.
+    let mut out = Vec::new();
     execute!(
         out,
         terminal::Clear(terminal::ClearType::All),
         cursor::MoveTo(0, 0)
     )?;
 
-    let breadcrumb = if menu.depth() > 1 {
-        format!("{} (h/← to go back)", menu.frame().title)
-    } else {
-        menu.frame().title.clone()
-    };
-    writeln!(out, "{}\r", truncate(&breadcrumb, cols))?;
+    let title = truncate(&menu.frame().title, cols);
+    paint_with(color, &mut out, Style::fg(theme::TITLE).bold(), &title)?;
+    if menu.depth() > 1 {
+        // The hint only fits in whatever the title left of the line.
+        let hint = truncate(
+            " (h/← to go back)",
+            cols.saturating_sub(title.chars().count() as u16),
+        );
+        paint_with(color, &mut out, Style::fg(theme::MUTED), &hint)?;
+    }
+    writeln!(out, "\r")?;
 
     if let Some(help) = &menu.frame().help {
-        writeln!(out, "{}\r", truncate(help, cols))?;
+        paint_with(
+            color,
+            &mut out,
+            Style::fg(theme::MUTED),
+            &truncate(help, cols),
+        )?;
+        writeln!(out, "\r")?;
         writeln!(out, "\r")?;
     }
     writeln!(out, "\r")?;
 
     if menu.is_empty() {
-        writeln!(out, "  (no entries)\r")?;
+        paint_with(color, &mut out, Style::fg(theme::MUTED), "  (no entries)")?;
+        writeln!(out, "\r")?;
     }
 
     let offset = menu.offset();
@@ -247,20 +276,48 @@ fn draw(menu: &mut MenuState) -> Result<()> {
         .skip(offset)
         .take(list_height)
     {
-        let marker = if item.has_detail() { " >" } else { "  " };
+        let selected = index == menu.cursor();
+        let detail_marker = if item.has_detail() { " >" } else { "  " };
         let line = format!(
-            "{} {}{marker}",
-            cursor_marker(index == menu.cursor()),
+            "{} {}{detail_marker}",
+            cursor_marker(selected),
             item.label()
         );
-        if index == menu.cursor() {
-            execute!(out, style::SetAttribute(style::Attribute::Reverse))?;
-            write!(out, "{}", truncate(&line, cols))?;
-            execute!(out, style::SetAttribute(style::Attribute::Reset))?;
-            writeln!(out, "\r")?;
+
+        if selected {
+            // Padded first, so the highlight is a bar across the whole width
+            // rather than a patch the length of the label.
+            let line = pad(&truncate(&line, cols), cols);
+            let (marker, label) = split_marker(&line);
+            // The two runs share a background, so the bar reads as one block
+            // with the marker picked out in front of it.
+            paint_with(
+                color,
+                &mut out,
+                Style::fg(theme::CURSOR)
+                    .on(theme::SELECTED_BG)
+                    .bold()
+                    .highlight(),
+                marker,
+            )?;
+            paint_with(
+                color,
+                &mut out,
+                Style::fg(theme::SELECTED_FG)
+                    .on(theme::SELECTED_BG)
+                    .bold()
+                    .highlight(),
+                label,
+            )?;
         } else {
-            writeln!(out, "{}\r", truncate(&line, cols))?;
+            let style = if item.has_detail() {
+                Style::fg(theme::CONTAINER)
+            } else {
+                Style::default()
+            };
+            paint_with(color, &mut out, style, &truncate(&line, cols))?;
         }
+        writeln!(out, "\r")?;
     }
 
     let footer = match menu.selected() {
@@ -270,22 +327,62 @@ fn draw(menu: &mut MenuState) -> Result<()> {
         },
         None => String::new(),
     };
+    let footer = pad(&truncate(&footer, cols), cols);
+    let (sigil, rest) = split_marker(&footer);
     execute!(out, cursor::MoveTo(0, rows.saturating_sub(1)))?;
-    execute!(out, style::SetAttribute(style::Attribute::Reverse))?;
-    write!(out, "{}", pad(&truncate(&footer, cols), cols))?;
-    execute!(out, style::SetAttribute(style::Attribute::Reset))?;
+    paint_with(
+        color,
+        &mut out,
+        Style::fg(theme::COMMAND)
+            .on(theme::FOOTER_BG)
+            .bold()
+            .highlight(),
+        sigil,
+    )?;
+    paint_with(
+        color,
+        &mut out,
+        Style::fg(theme::FOOTER_FG).on(theme::FOOTER_BG).highlight(),
+        rest,
+    )?;
+
+    Ok(out)
+}
+
+/// Send a frame built by [`render`] or [`draw_prompt`] to the terminal in one
+/// write.
+fn flush(frame: &[u8]) -> Result<()> {
+    let mut out = stderr();
+    out.write_all(frame)?;
     out.flush()?;
     Ok(())
 }
 
+/// Split the two-character sigil (`*>`, `$ `, `> `) off the front of a line so
+/// it can be coloured on its own. Both halves may be empty on a very narrow
+/// terminal.
+fn split_marker(line: &str) -> (&str, &str) {
+    match line.char_indices().nth(2) {
+        Some((at, _)) => line.split_at(at),
+        None => (line, ""),
+    }
+}
+
 fn draw_prompt(label: &str, editor: &LineEditor) -> Result<()> {
     let (cols, rows) = terminal_size();
-    let mut out = stderr();
+    let mut out = Vec::new();
 
     let line = format!("{label}: {}", editor.text());
+    let line = truncate(&line, cols);
+    let (prompt, value) = match line.char_indices().nth(label.chars().count() + 1) {
+        Some((at, _)) => line.split_at(at),
+        None => (line.as_str(), ""),
+    };
     execute!(out, cursor::MoveTo(0, rows.saturating_sub(1)))?;
     execute!(out, terminal::Clear(terminal::ClearType::CurrentLine))?;
-    write!(out, "{}", truncate(&line, cols))?;
+    let color = theme::enabled();
+    paint_with(color, &mut out, Style::fg(theme::TITLE).bold(), prompt)?;
+    paint_with(color, &mut out, Style::default(), value)?;
 
     // Put the real cursor where the text cursor is, so the terminal's own
     // caret marks the insertion point.
@@ -295,8 +392,8 @@ fn draw_prompt(label: &str, editor: &LineEditor) -> Result<()> {
         cursor::MoveTo(column as u16, rows.saturating_sub(1)),
         cursor::Show
     )?;
-    out.flush()?;
-    Ok(())
+
+    flush(&out)
 }
 
 /// Terminal size, with a usable fallback.
@@ -418,6 +515,118 @@ mod tests {
         assert!(matches!(classify(&key(KeyCode::Char('q'))), Action::Quit));
         assert!(matches!(classify(&key(KeyCode::Esc)), Action::Quit));
         assert!(matches!(classify(&key(KeyCode::Enter)), Action::Select));
+    }
+
+    /// Render a small menu and return the frame as text, escapes included.
+    ///
+    /// This is the only look at the drawing code that does not need a
+    /// terminal. `color` is passed to [`render`] rather than taken from the
+    /// environment, so one test run covers both modes.
+    fn rendered(color: bool) -> String {
+        let items = vec![
+            MenuItem::command("plain", "echo hi"),
+            MenuItem {
+                title: Some("with help".into()),
+                help: Some("some help".into()),
+                ..Default::default()
+            },
+        ];
+        let mut menu = MenuState::new(Frame::new("title", items));
+        menu.move_down();
+        String::from_utf8(render(&mut menu, 40, 10, color).unwrap()).unwrap()
+    }
+
+    /// Drop the escape sequences, leaving what the user actually sees. A row is
+    /// painted in several runs, so its text is not contiguous in the frame.
+    fn without_escapes(frame: &str) -> String {
+        let mut text = String::new();
+        let mut chars = frame.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                text.push(c);
+                continue;
+            }
+            // Past the `[` that opens a CSI sequence; it ends at the first
+            // byte in `@`..=`~`, which the `[` itself would otherwise match.
+            let mut chars = chars.by_ref().skip(1);
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+        text
+    }
+
+    /// The selected row of a rendered frame, escapes still in place.
+    ///
+    /// Rows are matched on their visible text, so the assertions cannot be
+    /// satisfied by some other part of the frame — the status line is
+    /// highlighted too, and would otherwise stand in for a selected row that
+    /// had lost its highlight entirely.
+    fn selected_row(frame: &str) -> &str {
+        frame
+            .split("\r\n")
+            .find(|row| without_escapes(row).contains("*> with help"))
+            .unwrap_or_else(|| panic!("the selected entry is drawn: {frame:?}"))
+    }
+
+    #[test]
+    fn the_selected_row_is_a_full_width_bar() {
+        for color in [true, false] {
+            let frame = rendered(color);
+            let bar = selected_row(&frame);
+            // Padded to the width, so the highlight covers the whole row.
+            assert_eq!(
+                without_escapes(bar).chars().count(),
+                39,
+                "the bar should run to the edge, got {bar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_selected_row_is_marked_out_whether_or_not_color_is_on() {
+        for color in [true, false] {
+            let frame = rendered(color);
+            let bar = selected_row(&frame);
+            // The row is drawn as two runs — the marker and the rest — and
+            // the highlight has to cover both, or the bar has a hole in it.
+            // Without colour that means reverse video, which is the whole
+            // point of `Style::highlight`: drop it and this fails.
+            let sequence = if color {
+                "\u{1b}[48;5;12m"
+            } else {
+                "\u{1b}[7m"
+            };
+            assert_eq!(
+                bar.matches(sequence).count(),
+                2,
+                "{sequence:?} does not cover {bar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_with_a_detail_view_is_told_apart_from_a_plain_command() {
+        let frame = rendered(true);
+        let plain = frame
+            .lines()
+            .find(|line| line.contains("plain"))
+            .expect("the unselected entry is drawn");
+        // An unselected plain command is drawn as-is, with no escapes at all.
+        // (`lines` has already taken the `\r` of the raw-mode line ending.)
+        assert_eq!(plain, "   plain  ", "got {plain:?}");
+
+        let detail = without_escapes(&frame);
+        let detail = detail
+            .lines()
+            .find(|line| line.contains("with help"))
+            .expect("the entry with a detail view is drawn");
+        assert!(
+            detail.contains("with help >"),
+            "the detail marker is missing from {detail:?}"
+        );
     }
 
     #[test]

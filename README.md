@@ -93,6 +93,19 @@ runs, whichever level you run it from.
 While entering an argument: `Enter` accepts, `Esc` cancels, and the usual
 `Ctrl-A` / `Ctrl-E` / `Ctrl-U` motions work.
 
+### Colours
+
+The menu is coloured: a cyan title, entries with a detail view (a submenu, a
+help text, or both) in cyan, the selected row as a blue bar with a yellow `*>`
+marker, and a status line carrying the command preview (or the entry count of
+a submenu). Only colours the
+terminal itself defines (palette entries 0–15) are used, so it follows your
+theme.
+
+Set `NO_COLOR` to a non-empty value to turn the colours off; `TERM=dumb` does
+the same. The selected row and the status line then fall back to reverse video,
+so they stay visible.
+
 ### Exit codes
 
 `jj-menu` exits with the exit code of the command it ran, so `jj && something`

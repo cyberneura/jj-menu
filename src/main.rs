@@ -58,7 +58,19 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("jj-menu: {err:#}");
+            let mut out = stderr();
+            // Unlike the menu, this can end up in a file or a pipe, so the
+            // colour depends on where it is going.
+            if out.is_terminal() {
+                let _ = ui::theme::paint(
+                    &mut out,
+                    ui::theme::Style::fg(ui::theme::ERROR).bold(),
+                    "jj-menu:",
+                );
+                let _ = writeln!(out, " {err:#}");
+            } else {
+                let _ = writeln!(out, "jj-menu: {err:#}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -117,7 +129,16 @@ fn run() -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
 
-            eprintln!("$ {script}");
+            // stderr is known to be a terminal here: the menu was just drawn
+            // on it.
+            let mut out = stderr();
+            ui::theme::paint(
+                &mut out,
+                ui::theme::Style::fg(ui::theme::COMMAND).bold(),
+                "$",
+            )?;
+            writeln!(out, " {script}")?;
+            out.flush()?;
             let status = exec::run(&script, &start_dir)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.

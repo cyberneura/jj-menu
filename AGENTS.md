@@ -30,16 +30,24 @@ handler, where nothing that locks may be called.
 
 ## Commands
 
+Run these before pushing — they are what CI (`.github/workflows/ci.yml`)
+checks, in this order, plus `cargo build --release`:
+
 ```shell
-cargo test
-cargo clippy --all-targets -- -D warnings
 cargo fmt --check
-cargo run                  # opens the menu in the current directory
-cargo run -- --show-config # which configuration files were loaded
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly those four, then
-`cargo build --release`. Run them before pushing.
+For looking at the thing by hand, when you have a terminal:
+
+```shell
+cargo run                  # opens the menu in the current directory
+cargo run -- --show-config # which configuration files were loaded, then exits
+```
+
+`cargo run` opens the interactive menu and waits for a key, so it is not part
+of any automated check.
 
 ## Working on the terminal code
 

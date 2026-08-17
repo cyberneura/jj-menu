@@ -109,9 +109,12 @@ first.
 ## Automatic launchers
 
 Entries are also derived from `package.json` scripts (run with the package
-manager implied by the nearest lock file), `Makefile` targets that need no extra
-arguments, Cargo (`build`/`test`/`check`/`run`, plus `fmt` and `clippy` when
-installed) and Gradle. **This happens whether or not a configuration file
+manager implied by the nearest lock file, npm when there is none), `Makefile`
+targets that need no extra arguments, Cargo (`build` / `test` / `check`
+unconditionally, `run` only when the package has a binary — one entry per binary
+when there are several, none for a virtual workspace or a library-only package —
+and `fmt` / `clippy` when the component is installed) and Gradle.
+**This happens whether or not a configuration file
 exists** — writing one does not turn the launchers off. Configured entries come
 first, then one group per source; a lone group is flattened into the top level
 when nothing is configured.
@@ -138,8 +141,10 @@ auto_launchers:
   gradle: false
 ```
 
-The nearest configuration file decides; files further up only fill in values not
-already set.
+The **whole block** is decided by the nearest file that sets `auto_launchers` at
+all; a file further up is then ignored, rather than merged switch by switch. So
+`{makefile: false}` in the nearest file silences a `{cargo: false}` in an
+ancestor, and cargo stays on — every switch you need has to be in the same file.
 
 ## Checking a change
 

@@ -315,8 +315,10 @@ auto_launchers:
   gradle: false
 ```
 
-The nearest configuration file decides; files further up only fill in a value
-that has not been set yet.
+The nearest file that sets `auto_launchers` at all decides the whole block; one
+further up is then ignored rather than merged switch by switch. A nearer
+`{makefile: false}` therefore silences an ancestor's `{cargo: false}`, and cargo
+stays on — put every switch you need in the same file.
 
 ## Agent skill
 

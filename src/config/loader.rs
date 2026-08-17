@@ -136,8 +136,12 @@ pub fn load(start_dir: &Path) -> Result<Config> {
             continue;
         }
 
-        // The nearest file that actually sets `auto_launchers` wins; files
-        // further up only fill in a value nobody has decided yet.
+        // The nearest file that sets `auto_launchers` at all takes the whole
+        // block: the switches inside it are not merged with an ancestor's, so
+        // a nearer `{makefile: false}` leaves an ancestor's `{cargo: false}`
+        // with no effect. Merging them would mean a repository-wide file could
+        // turn a launcher off in a directory that deliberately asked for it,
+        // with nothing local saying so.
         if auto_launchers.is_none() {
             auto_launchers = file.auto_launchers;
         }

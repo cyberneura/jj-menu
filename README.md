@@ -249,9 +249,10 @@ a guess about which of the two Enter should run.
 - **Ctrl-C stops the whole group.** Each command runs in a process group of its
   own, and the signal goes to the group, so it also reaches whatever that
   command started — `sleep 300; echo done` stops, not just the shell in front of
-  it. `jj-menu` waits for them all before returning, so nothing is left writing
-  to the terminal behind your prompt, and a second Ctrl-C kills what has not
-  stopped by then.
+  it. `jj-menu` waits for them all before returning, so the group is not left
+  writing to the terminal behind your prompt, and a second Ctrl-C kills what has
+  not stopped by then. A process a command *detached* on purpose (`something &`,
+  `nohup`) is not followed, the same as when a shell you typed into exits.
 - **The exit code is the first failure**, in the order the commands are written,
   or 0 when they all succeed. A command killed by the interrupt reports
   `128 + signal`, so a group stopped with Ctrl-C normally exits 130.

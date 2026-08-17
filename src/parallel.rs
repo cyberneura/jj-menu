@@ -27,6 +27,15 @@
 //! one cannot hold the menu open, and the group is only left once every child
 //! has been reaped — `jj` cannot return to the prompt with jobs still writing
 //! to the terminal behind it.
+//!
+//! What is *not* followed is a process a job put in the background itself
+//! (`something &`, `nohup`) and then walked away from. Once the job's own shell
+//! has been reaped there is nothing left to wait on: the group is watched
+//! through the child, and waiting on the process group ID instead would both
+//! hang on any entry that deliberately starts a daemon and start signalling
+//! into a group ID the kernel is free to hand to somebody else. A detached
+//! process outliving the thing that started it is what detaching means, and a
+//! plain `shell:` entry leaves one behind in exactly the same way.
 
 use std::io::stderr;
 use std::os::fd::{AsFd, OwnedFd};
@@ -124,7 +133,7 @@ pub fn run(jobs: &[Job], cwd: &Path, output: Output) -> Result<u8> {
     // A stop signal that arrived after the last job was reaped was never acted
     // on. Die of it now that the disposition is back to what it was, so a
     // `SIGTERM` at the wrong moment is not silently swallowed.
-    if let Some(signal) = taken() {
+    if let Some((_, signal)) = taken() {
         // SAFETY: raising a signal at this process, with the handler disarmed.
         unsafe { libc::raise(signal) };
     }
@@ -222,17 +231,10 @@ fn wait_all(children: &mut Children, mut forwarded: usize) -> Result<u8> {
     let mut wait_failed: Option<anyhow::Error> = None;
 
     loop {
-        if let Some(signal) = taken() {
-            // The first stop is passed on as-is, so a job sees the `SIGINT` or
-            // `SIGTERM` it would have seen from the terminal and can clean up.
-            // A second one means the user is done asking politely.
-            let signal = if forwarded == 0 {
-                signal
-            } else {
-                libc::SIGKILL
-            };
-            children.signal_all(signal);
-            forwarded += 1;
+        if let Some((count, signal)) = taken() {
+            children.signal_all(escalate(forwarded, count, signal));
+            // Added, not incremented: two stops in one interval are two asks.
+            forwarded += count;
         }
 
         let mut alive = false;
@@ -272,6 +274,21 @@ fn wait_all(children: &mut Children, mut forwarded: usize) -> Result<u8> {
     }
 }
 
+/// The signal to pass on to the jobs.
+///
+/// The first stop is passed on as it arrived, so a job sees the `SIGINT` or
+/// `SIGTERM` it would have got from the terminal and can clean up after itself.
+/// Anything after that is the user asking again, and gets `SIGKILL` — including
+/// a second stop that landed in the same poll interval as the first, which is
+/// why `count` is looked at and not just `forwarded`.
+fn escalate(forwarded: usize, count: usize, signal: libc::c_int) -> libc::c_int {
+    if forwarded == 0 && count == 1 {
+        signal
+    } else {
+        libc::SIGKILL
+    }
+}
+
 /// The code the group reports: the first failure, or 0.
 fn group_exit_code(statuses: &[Option<ExitStatus>]) -> u8 {
     statuses
@@ -304,12 +321,17 @@ extern "C" fn note(signal: libc::c_int) {
     RECEIVED.fetch_add(1, Ordering::SeqCst);
 }
 
-/// The signal to pass on, if one has arrived since the last look.
-fn taken() -> Option<libc::c_int> {
-    if RECEIVED.swap(0, Ordering::SeqCst) == 0 {
-        return None;
+/// The stops that have arrived since the last look: how many, and the signal
+/// of the most recent one.
+///
+/// The count is part of the answer, not a detail. Two Ctrl-C presses inside one
+/// poll interval arrive as one wake-up, and dropping the count would turn the
+/// second press — the one that escalates to `SIGKILL` — into nothing.
+fn taken() -> Option<(usize, libc::c_int)> {
+    match RECEIVED.swap(0, Ordering::SeqCst) {
+        0 => None,
+        count => Some((count, LAST.load(Ordering::SeqCst))),
     }
-    Some(LAST.load(Ordering::SeqCst))
 }
 
 fn arm() {
@@ -495,6 +517,106 @@ mod tests {
             "the interrupted job ran to the end"
         );
         assert_ne!(code, 0, "an interrupted job did not succeed");
+    }
+
+    #[test]
+    fn a_second_interrupt_kills_a_job_that_ignored_the_first() {
+        let _serial = serial();
+        let cwd = dir("escalate");
+        // The job ignores `SIGINT` — and so does the `sleep` it execs, since an
+        // ignored disposition survives exec — and then asks for two of them,
+        // far enough apart to be two separate polls. Nothing but the escalation
+        // to `SIGKILL` can end this before the half minute is up.
+        let jobs = vec![job(
+            "trap '' INT; kill -INT $PPID; sleep 0.5; kill -INT $PPID; sleep 30",
+        )];
+
+        let started = std::time::Instant::now();
+        let code = run(&jobs, &cwd, Output::Inherit).unwrap();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the second interrupt did not escalate"
+        );
+        assert_eq!(code, 137, "a killed job reports 128 + SIGKILL");
+    }
+
+    #[test]
+    fn two_stops_in_one_interval_kill_a_job_that_ignores_them() {
+        let _serial = serial();
+        let cwd = dir("escalate-pair");
+        // The pair of presses staged where the test above cannot reach: both
+        // are raised before the wait takes its first look, so the group has to
+        // notice that it was asked twice from a single wake-up. `raise` runs
+        // the handler before it returns, which is what makes this exact rather
+        // than a race against the poll interval.
+        let shell = login_shell();
+        let mut children = Children::default();
+        arm();
+        spawn_all(
+            &mut children,
+            &[job("trap '' INT; touch ready; sleep 30")],
+            &shell,
+            &cwd,
+            Output::Inherit,
+        )
+        .expect("the job starts");
+        wait_for(&cwd.join("ready"));
+
+        // SAFETY: raising a signal at this process with the handler armed.
+        unsafe {
+            libc::raise(libc::SIGINT);
+            libc::raise(libc::SIGINT);
+        }
+        let started = std::time::Instant::now();
+        let code = wait_all(&mut children, 0);
+        disarm();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the second of the two stops was dropped"
+        );
+        assert_eq!(code.unwrap(), 137, "a killed job reports 128 + SIGKILL");
+    }
+
+    /// Block until `marker` exists, so a job's setup is not raced.
+    fn wait_for(marker: &std::path::Path) {
+        for _ in 0..500 {
+            if marker.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the job never got as far as {}", marker.display());
+    }
+
+    #[test]
+    fn two_stops_before_the_next_look_are_counted_as_two() {
+        let _serial = serial();
+        // The pair of Ctrl-C presses the test above cannot stage: `raise` runs
+        // the handler before it returns, so both are seen with no poll in
+        // between. Dropping the count here is what would turn the second press
+        // into nothing.
+        arm();
+        // SAFETY: raising a signal at this process while the handler that
+        // records it — rather than dying of it — is armed.
+        unsafe {
+            libc::raise(libc::SIGINT);
+            libc::raise(libc::SIGINT);
+        }
+        let seen = taken();
+        disarm();
+
+        assert_eq!(seen, Some((2, libc::SIGINT)));
+    }
+
+    #[test]
+    fn only_the_first_stop_is_passed_on_as_it_arrived() {
+        assert_eq!(escalate(0, 1, libc::SIGINT), libc::SIGINT);
+        assert_eq!(escalate(0, 1, libc::SIGTERM), libc::SIGTERM);
+        // Asked twice, whether or not the two landed in the same interval.
+        assert_eq!(escalate(0, 2, libc::SIGINT), libc::SIGKILL);
+        assert_eq!(escalate(1, 1, libc::SIGINT), libc::SIGKILL);
     }
 
     #[test]

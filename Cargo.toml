@@ -1,6 +1,6 @@
 [package]
 name = "jj-menu"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "A simple TUI menu launcher. Press `jj` and Enter to pick and run a command."
@@ -35,3 +35,10 @@ toml = "1.1.4"
 strip = true
 lto = true
 codegen-units = 1
+
+# cargo-dist builds with this profile, and names it whether or not it exists:
+# without it the release build stops at `profile `dist` is not defined` before
+# it compiles anything. It inherits the release profile so a released binary is
+# the one the release profile describes.
+[profile.dist]
+inherits = "release"

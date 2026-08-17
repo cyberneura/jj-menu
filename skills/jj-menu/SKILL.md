@@ -26,11 +26,19 @@ Base names: `.jj-menu`, `_jj-menu`, `jj-menu`, and the `.local` variants
 Within one directory the shared file loads before the `.local` one, so a
 `.jj-menu.local.yaml` holds personal entries and stays out of the repository.
 
-**Adding an entry: edit the file that already exists** — find it with
-`jj-menu --show-config`, which lists exactly the files that were loaded. Only
-create a new file when there is none. For a repository, `.jj-menu.yaml` at the
-root is the normal choice; put anything personal in `.jj-menu.local.yaml` and
-check that it is gitignored.
+**Adding an entry: choose the file by scope, then reuse it.**
+`jj-menu --show-config` lists exactly the files that were loaded, but those span
+scopes — an ancestor's file is shared with every sibling project, and the
+per-user one is outside the checkout altogether. Reuse the loaded file whose
+scope matches the request; when only broader ones are loaded, create the right
+file rather than editing what is there, or the entry turns up in projects that
+never asked for it.
+
+| Scope of the request | File |
+| --- | --- |
+| This repository, shared with whoever clones it | `.jj-menu.yaml` at the repository root |
+| This repository, yours only | `.jj-menu.local.yaml` — check that it is gitignored |
+| Every project | the per-user file |
 
 ## Format
 
@@ -159,8 +167,15 @@ jj-menu --show-config   # lists the configuration files that were loaded, then e
 
 A file that fails to parse is reported here, including one with an unknown key:
 every configuration struct rejects fields it does not know, so a typo is an error
-rather than a silently ignored line. Do not invent fields. To see the menu, ask
-the user to run `jj`.
+rather than a silently ignored line. Do not invent fields.
+
+**This only covers the files that actually applied.** A `merge: false` file that
+was skipped is never parsed — an inactive fallback deliberately cannot abort
+startup with an error in a part of it nobody reads. So a clean `--show-config` is
+no evidence that a fallback is valid: run it from a directory where that file is
+the nearest one.
+
+To see the menu, ask the user to run `jj`.
 
 `--print` prints the selected command instead of running it, but still opens the
 menu, so it is for the user, not for you.

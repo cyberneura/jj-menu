@@ -232,6 +232,11 @@ once a directory has its own menu.
 It has no effect on the nearest file itself, which is always the one loaded
 first.
 
+A file skipped this way is not parsed either, so an error inside it is not
+reported while it stays inactive: a fallback nobody is reading must not be able
+to stop `jj` from opening. The flip side is that `--show-config` says nothing
+about such a file — check it from a directory where it is the nearest one.
+
 ## Automatic launchers
 
 With no configuration at all, `jj-menu` still has something to show: it looks

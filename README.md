@@ -203,10 +203,14 @@ shell = "pnpm dev"
 Each `args` entry has a `name` (the `{name}` placeholder in `shell`), and
 optionally a `prompt` and a `default`.
 
-Values are substituted verbatim, so quoting is up to the template: write
-`rg {pattern}` if you want the input to be able to carry flags, and
-`rg "{pattern}"` if you want it treated as one literal word. A placeholder with
-no matching argument is left alone, so `${HOME}` and `a{1,2}` survive unharmed.
+Values are substituted verbatim — the input is pasted into the script before the
+shell parses it, and nothing escapes it — so quoting is up to the template: write
+`rg {pattern}` if you want the input to be able to carry flags and its own
+quoting, and `rg "{pattern}"` if you want whitespace in it to stay in a single
+argument. The quotes do not make it literal: `$(...)`, backticks and `$VAR` still
+expand inside them, and a `"` in the input ends the quoted section. An entry is
+as trusted as whoever types into its prompt. A placeholder with no matching
+argument is left alone, so `${HOME}` and `a{1,2}` survive unharmed.
 
 ### Not merging
 
@@ -313,6 +317,21 @@ auto_launchers:
 
 The nearest configuration file decides; files further up only fill in a value
 that has not been set yet.
+
+## Agent skill
+
+`skills/jj-menu/` is an agent skill describing the configuration format, so a
+coding agent can write and edit menu files for you. Install it with the
+[skills](https://github.com/vercel-labs/skills) CLI:
+
+```shell
+npx skills add cyberneura/jj-menu            # into ./<agent>/skills/
+npx skills add cyberneura/jj-menu -g         # into ~/<agent>/skills/, all projects
+```
+
+It works with Claude Code, Codex, Cursor, OpenCode and the rest of the agents
+that CLI supports. It detects the ones you have installed and prompts when the
+choice is ambiguous; `-a <agent>` picks explicitly.
 
 ## Unsupported formats
 

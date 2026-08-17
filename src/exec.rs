@@ -26,12 +26,13 @@ pub fn run(script: &str, cwd: &Path) -> Result<ExitStatus> {
         .with_context(|| format!("failed to run {shell} -c {script:?}"))
 }
 
-/// The shell used to interpret a menu command.
+/// The shell used to interpret a menu command. Shared with
+/// [`crate::parallel`], which starts one of these per job.
 ///
 /// `$SHELL` is what the user chose, so their aliases-free but familiar syntax
 /// (zsh globs, bash arrays) works. `/bin/sh` is the fallback because it is the
 /// one shell POSIX guarantees exists.
-fn login_shell() -> String {
+pub fn login_shell() -> String {
     shell_from(std::env::var("SHELL").ok())
 }
 

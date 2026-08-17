@@ -122,10 +122,11 @@ impl MenuState {
         }
 
         let mut items = Vec::with_capacity(item.submenu.len() + 1);
-        if item.shell.is_some() {
+        if item.launch().is_some() {
             items.push(MenuItem {
                 title: Some(format!("Run: {}", item.label())),
                 shell: item.shell.clone(),
+                parallel: item.parallel.clone(),
                 args: item.args.clone(),
                 ..Default::default()
             });

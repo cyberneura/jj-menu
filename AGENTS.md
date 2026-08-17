@@ -24,6 +24,7 @@ handler, where nothing that locks may be called.
 | `src/menu.rs` | Builds the menu from configuration plus launchers |
 | `src/ui/` | The interactive menu: `mod.rs` drawing, `state.rs` navigation, `prompt.rs` line editing, `theme.rs` colours |
 | `src/exec.rs` | Running the selected script |
+| `src/parallel.rs` | Running a `parallel:` group: one shell per member, and passing Ctrl-C on to all of them |
 | `src/signal.rs` | Restoring the terminal when a signal kills the process |
 | `src/shell_init.rs` | The `jj` wrapper function for bash / zsh / fish |
 | `tests/` | Integration tests for configuration merging |

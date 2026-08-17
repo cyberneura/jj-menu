@@ -6,6 +6,7 @@ mod config;
 mod exec;
 mod launchers;
 mod menu;
+mod parallel;
 mod shell_init;
 mod signal;
 mod ui;
@@ -17,6 +18,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use config::Launch;
 use shell_init::ShellKind;
 
 /// Exit code used when the menu is dismissed without choosing anything.
@@ -121,7 +123,7 @@ fn run() -> Result<ExitCode> {
     let title = format!("jj-menu — {}", start_dir.display());
     match ui::run(items, &title)? {
         ui::Outcome::Cancelled => Ok(ExitCode::from(EXIT_CANCELLED)),
-        ui::Outcome::Run(script) => {
+        ui::Outcome::Run(Launch::Script(script)) => {
             if args.print {
                 let mut out = stdout();
                 writeln!(out, "{script}")?;
@@ -129,22 +131,50 @@ fn run() -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
 
-            // stderr is known to be a terminal here: the menu was just drawn
-            // on it.
-            let mut out = stderr();
-            ui::theme::paint(
-                &mut out,
-                ui::theme::Style::fg(ui::theme::COMMAND).bold(),
-                "$",
-            )?;
-            writeln!(out, " {script}")?;
-            out.flush()?;
+            echo("$", &script)?;
             let status = exec::run(&script, &start_dir)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.
             Ok(ExitCode::from(exec::exit_code(status)))
         }
+        ui::Outcome::Run(Launch::Parallel(jobs)) => {
+            // Run here even under `--print`. There is nothing to hand back to
+            // the calling shell: the point of `--print` is that `cd` and
+            // `export` reach the user's shell, and a group is several separate
+            // processes, none of which could change it anyway. Printing them
+            // as one script would mean writing the `&`-and-`wait` form of
+            // whichever shell is calling — and fish, which the wrapper
+            // supports, does not have it.
+            for job in &jobs {
+                echo("&", &job.script)?;
+            }
+            // With `--print` the wrapper is reading stdout through a command
+            // substitution and evaluates whatever comes back; a job writing
+            // there would be *run*, not shown. Send it to the terminal instead.
+            let output = if args.print {
+                parallel::Output::Stderr
+            } else {
+                parallel::Output::Inherit
+            };
+            Ok(ExitCode::from(parallel::run(&jobs, &start_dir, output)?))
+        }
     }
+}
+
+/// Echo a command before it runs, the way a shell shows what it is doing.
+///
+/// `sigil` is `$` for a single command and `&` for one member of a parallel
+/// group. stderr is known to be a terminal here: the menu was just drawn on it.
+fn echo(sigil: &str, script: &str) -> Result<()> {
+    let mut out = stderr();
+    ui::theme::paint(
+        &mut out,
+        ui::theme::Style::fg(ui::theme::COMMAND).bold(),
+        sigil,
+    )?;
+    writeln!(out, " {script}")?;
+    out.flush()?;
+    Ok(())
 }
 
 fn report_config(config: &config::Config, start_dir: &std::path::Path) {
@@ -178,6 +208,13 @@ Create a configuration file in this directory or an ancestor, for example
       shell: ls -la
     - title: Git log
       shell: git log --oneline --graph --decorate --all
+    - title: Dev servers
+      # Each entry gets its own shell and they all run at once; Ctrl-C
+      # stops the lot.
+      parallel:
+        - shell: npm run dev
+        - shell: npm run api
+
     - title: Deploy
       help: Pick the environment to deploy to.
       submenu:
@@ -212,6 +249,7 @@ mod tests {
         let help = no_entries_help();
         assert!(help.contains("menu:"));
         assert!(help.contains("shell:"));
+        assert!(help.contains("parallel:"));
         assert!(help.contains("--shell-init"));
     }
 
@@ -231,7 +269,7 @@ mod tests {
 
         let parsed = config::loader::parse(std::path::Path::new("sample.yaml"), &sample)
             .expect("the sample in the help text must parse");
-        assert_eq!(parsed.menu.len(), 4);
+        assert_eq!(parsed.menu.len(), 5);
     }
 
     #[test]

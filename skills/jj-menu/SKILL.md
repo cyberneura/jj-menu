@@ -1,6 +1,6 @@
 ---
 name: jj-menu
-description: Write and maintain jj-menu configuration files (.jj-menu.yaml / .toml / .json) — the per-project TUI menu reached by typing `jj`. Use when adding, editing or debugging menu entries, submenus, prompted arguments, merge behaviour or automatic launchers, or when the user mentions jj-menu, `.jj-menu.yaml`, or asks to put a command "in the jj menu".
+description: Write and maintain jj-menu configuration files (.jj-menu.yaml / .toml / .json) — the per-project TUI menu reached by typing `jj`. Use when adding, editing or debugging menu entries, submenus, prompted arguments, commands run in parallel, merge behaviour or automatic launchers, or when the user mentions jj-menu, `.jj-menu.yaml`, or asks to put a command "in the jj menu".
 ---
 
 # jj-menu configuration
@@ -55,6 +55,13 @@ menu:
       - make clean
       - make -j
 
+  - title: Dev servers
+    # Each entry is its own shell and they all run at once.
+    parallel:
+      - shell: npm run dev
+      - title: api
+        shell: npm run api
+
   - title: Deploy
     help: Pick the environment to deploy to.
     submenu:
@@ -78,9 +85,36 @@ A bare list with no `menu:` key is also valid. The same structure works in TOML
 | --- | --- |
 | `title` | Label. Defaults to `shell`. |
 | `shell` | Command, or a list of commands run as one script. |
+| `parallel` | Commands run at the same time, one shell each. |
 | `help` | Description shown in the detail view (`l` / `→`). |
 | `submenu` | Nested entries. |
 | `args` | Values prompted for and substituted into `shell`. |
+
+### parallel
+
+A `shell` list runs sequentially in one shell; `parallel` starts every entry
+under it in its own shell at the same time and finishes when the last one exits.
+Use it for the things a person would otherwise open two terminals for — a dev
+server plus its API, a watcher plus a test runner.
+
+A member takes **`title` and `shell` only** (`shell` may be a list, which then
+runs as one script in that member's shell). `submenu`, `help` and `args` are not
+accepted there — a member is not a menu level. `args` go on the entry that owns
+the group and are substituted into every member, so the value is asked for once.
+
+**`shell` and `parallel` on the same entry is an error**, not a combination.
+
+What to tell the user about it:
+
+- Ctrl-C stops the whole group, including what a command started rather than
+  exec'd; a second one kills whatever ignored the first.
+- The exit code is the first failure in written order, or 0 if all succeed. A
+  command killed by the interrupt reports `128 + signal`, so an interrupted
+  group normally exits 130.
+- Output interleaves, and stdin is `/dev/null` — nothing in a group can prompt
+  for input. Anything interactive needs a plain `shell` entry.
+- The shell wrapper cannot evaluate a group, so `cd` in one has no effect on the
+  user's shell (it never could: each member is a separate process).
 
 ### args
 

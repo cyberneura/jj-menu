@@ -157,6 +157,13 @@ menu:
       - make clean
       - make -j
 
+  - title: Dev servers
+    # Each of these gets its own shell and they all run at once.
+    parallel:
+      - shell: npm run dev
+      - title: api
+        shell: npm run api
+
   - title: Deploy
     help: Pick the environment to deploy to.
     submenu:
@@ -196,6 +203,7 @@ shell = "pnpm dev"
 | --- | --- |
 | `title` | Label shown in the menu. Defaults to `shell`. |
 | `shell` | Command, or a list of commands run as one script. |
+| `parallel` | Commands to run at the same time, one shell each. |
 | `help` | Description shown in the detail view. |
 | `submenu` | Nested entries, opened with `l` / `→`. |
 | `args` | Values prompted for and substituted into `shell`. |
@@ -211,6 +219,51 @@ argument. The quotes do not make it literal: `$(...)`, backticks and `$VAR` stil
 expand inside them, and a `"` in the input ends the quoted section. An entry is
 as trusted as whoever types into its prompt. A placeholder with no matching
 argument is left alone, so `${HOME}` and `a{1,2}` survive unharmed.
+
+### Running commands at once
+
+A `shell` list runs its commands one after the other in a single shell.
+`parallel` is the other case: every entry under it is a separate shell, all of
+them are started together, and the menu is done when the last one has exited.
+
+```yaml
+menu:
+  - title: Dev servers
+    parallel:
+      - shell: npm run dev
+      - title: api
+        shell:
+          - cd api
+          - npm start
+```
+
+A member takes `title` and `shell` and nothing else — it is not a menu level of
+its own, so `submenu`, `help` and `args` have nowhere to appear on it. `shell`
+may be a list there too, which then runs as one script in that member's shell.
+`args` belong to the entry that owns the group and are substituted into every
+member, so the value is asked for once.
+
+An entry may not have both `shell` and `parallel`; that is an error rather than
+a guess about which of the two Enter should run.
+
+- **Ctrl-C stops the whole group.** Each command runs in a process group of its
+  own, and the signal goes to the group, so it also reaches whatever that
+  command started — `sleep 300; echo done` stops, not just the shell in front of
+  it. `jj-menu` waits for them all before returning, so the group is not left
+  writing to the terminal behind your prompt, and a second Ctrl-C kills what has
+  not stopped by then. A process a command *detached* on purpose (`something &`,
+  `nohup`) is not followed, the same as when a shell you typed into exits.
+- **The exit code is the first failure**, in the order the commands are written,
+  or 0 when they all succeed. A command killed by the interrupt reports
+  `128 + signal`, so a group stopped with Ctrl-C normally exits 130.
+- **Output is interleaved**, exactly as it would be from `a & b & wait`.
+- **Nothing can read from the keyboard**: the commands get `/dev/null` on
+  stdin, because several processes taking turns at the terminal cannot be told
+  apart. Anything interactive belongs in a plain `shell`.
+- **The shell wrapper does not evaluate a group.** `--print` hands a single
+  command back to your shell so that `cd` and `export` reach it; a group is
+  several separate processes, none of which could do that, so `jj-menu` runs it
+  itself and prints nothing. Everything above applies either way.
 
 ### Not merging
 

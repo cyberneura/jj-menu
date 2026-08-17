@@ -203,10 +203,14 @@ shell = "pnpm dev"
 Each `args` entry has a `name` (the `{name}` placeholder in `shell`), and
 optionally a `prompt` and a `default`.
 
-Values are substituted verbatim, so quoting is up to the template: write
-`rg {pattern}` if you want the input to be able to carry flags, and
-`rg "{pattern}"` if you want it treated as one literal word. A placeholder with
-no matching argument is left alone, so `${HOME}` and `a{1,2}` survive unharmed.
+Values are substituted verbatim — the input is pasted into the script before the
+shell parses it, and nothing escapes it — so quoting is up to the template: write
+`rg {pattern}` if you want the input to be able to carry flags and its own
+quoting, and `rg "{pattern}"` if you want whitespace in it to stay in a single
+argument. The quotes do not make it literal: `$(...)`, backticks and `$VAR` still
+expand inside them, and a `"` in the input ends the quoted section. An entry is
+as trusted as whoever types into its prompt. A placeholder with no matching
+argument is left alone, so `${HOME}` and `a{1,2}` survive unharmed.
 
 ### Not merging
 
@@ -227,6 +231,11 @@ once a directory has its own menu.
 
 It has no effect on the nearest file itself, which is always the one loaded
 first.
+
+A file skipped this way is not parsed either, so an error inside it is not
+reported while it stays inactive: a fallback nobody is reading must not be able
+to stop `jj` from opening. The flip side is that `--show-config` says nothing
+about such a file — check it from a directory where it is the nearest one.
 
 ## Automatic launchers
 
@@ -311,8 +320,25 @@ auto_launchers:
   gradle: false
 ```
 
-The nearest configuration file decides; files further up only fill in a value
-that has not been set yet.
+The nearest file that sets `auto_launchers` at all decides the whole block; one
+further up is then ignored rather than merged switch by switch. A nearer
+`{makefile: false}` therefore silences an ancestor's `{cargo: false}`, and cargo
+stays on — put every switch you need in the same file.
+
+## Agent skill
+
+`skills/jj-menu/` is an agent skill describing the configuration format, so a
+coding agent can write and edit menu files for you. Install it with the
+[skills](https://github.com/vercel-labs/skills) CLI:
+
+```shell
+npx skills add cyberneura/jj-menu            # into ./<agent>/skills/
+npx skills add cyberneura/jj-menu -g         # into ~/<agent>/skills/, all projects
+```
+
+It works with Claude Code, Codex, Cursor, OpenCode and the rest of the agents
+that CLI supports. It detects the ones you have installed and prompts when the
+choice is ambiguous; `-a <agent>` picks explicitly.
 
 ## Unsupported formats
 

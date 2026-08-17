@@ -27,6 +27,7 @@ handler, where nothing that locks may be called.
 | `src/signal.rs` | Restoring the terminal when a signal kills the process |
 | `src/shell_init.rs` | The `jj` wrapper function for bash / zsh / fish |
 | `tests/` | Integration tests for configuration merging |
+| `skills/` | The agent skill published from this repository (`npx skills add cyberneura/jj-menu`) |
 
 ## Commands
 
@@ -79,6 +80,20 @@ behaviour is removed. Several assertions here look convincing while passing on
 mutated code.
 
 Ask the user to run `cargo run` when the change is visual; they have a terminal.
+
+## Working on the skill
+
+`skills/jj-menu/SKILL.md` restates the configuration format for an agent that has
+not read this repository. Nothing compiles it, so it rots silently: check any
+claim against the implementation rather than against `README.md`, which itself
+carries hedges (`dirs::config_dir()` is not `~/.config` on macOS) that are easy to
+drop when condensing.
+
+That it is still discoverable is checkable:
+
+```shell
+npx skills add . --list   # must report the skill with its name and description
+```
 
 ## Releasing
 

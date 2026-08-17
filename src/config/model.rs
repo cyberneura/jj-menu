@@ -31,7 +31,8 @@ pub struct ConfigFile {
 /// `shell` accepts either a single command or a list of commands. A list is
 /// joined with newlines and handed to the shell as one script, so the commands
 /// run sequentially in the same shell (this is how `cd` followed by another
-/// command keeps working).
+/// command keeps working). `parallel` is the other way to run several commands:
+/// each of its entries gets its own shell and they all run at once.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MenuItem {
@@ -42,6 +43,13 @@ pub struct MenuItem {
     /// Command(s) to run.
     #[serde(default)]
     pub shell: Option<Shell>,
+
+    /// Commands to run at the same time, each in its own shell.
+    ///
+    /// Mutually exclusive with `shell`; the loader rejects an entry that has
+    /// both, since which one Enter should run would be a guess.
+    #[serde(default)]
+    pub parallel: Vec<ParallelCommand>,
 
     /// Long description shown in the detail view.
     #[serde(default)]
@@ -54,6 +62,50 @@ pub struct MenuItem {
     /// Placeholders that are prompted for before running `shell`.
     #[serde(default)]
     pub args: Vec<ArgSpec>,
+}
+
+/// One command of a `parallel` group.
+///
+/// Has the same `title` / `shell` pair as a menu entry, but nothing else: a
+/// group member is not a menu level of its own, so a submenu or arguments on it
+/// would have nowhere to appear. Arguments belong to the entry that owns the
+/// group and are substituted into every member.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelCommand {
+    /// Name used when the group is announced before it runs. Falls back to
+    /// `shell`.
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Command(s) this member runs, as one script in one shell.
+    pub shell: Shell,
+}
+
+impl ParallelCommand {
+    /// Label for this member of the group.
+    pub fn label(&self) -> String {
+        match &self.title {
+            Some(title) if !title.is_empty() => title.clone(),
+            _ => first_line(&self.shell.script()).to_string(),
+        }
+    }
+}
+
+/// What an entry runs when it is selected, with arguments already substituted.
+#[derive(Debug, Clone)]
+pub enum Launch {
+    /// One script in one shell.
+    Script(String),
+    /// Several scripts at once, one shell each.
+    Parallel(Vec<Job>),
+}
+
+/// One command of a `parallel` group, ready to be spawned.
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub title: String,
+    pub script: String,
 }
 
 /// One or many shell commands.
@@ -174,15 +226,45 @@ impl MenuItem {
         {
             return title.clone();
         }
-        match &self.shell {
-            Some(shell) => first_line(&shell.script()).to_string(),
-            None => String::new(),
+        if let Some(shell) = &self.shell {
+            return first_line(&shell.script()).to_string();
         }
+        // A `parallel` entry with no title reads as what a shell would be
+        // asked to do: `a & b`.
+        self.parallel
+            .iter()
+            .map(|command| command.label())
+            .collect::<Vec<_>>()
+            .join(" & ")
     }
 
     /// The script this entry runs, if any.
+    ///
+    /// A `parallel` entry has no single script; use [`MenuItem::launch`] to
+    /// cover both kinds.
     pub fn script(&self) -> Option<String> {
         self.shell.as_ref().map(|s| s.script())
+    }
+
+    /// What Enter on this entry runs, or `None` when it only opens.
+    pub fn launch(&self) -> Option<Launch> {
+        // `shell` first: an entry carrying both is rejected while loading, so
+        // the order only decides what a hand-built item does.
+        if let Some(script) = self.script() {
+            return Some(Launch::Script(script));
+        }
+        if self.parallel.is_empty() {
+            return None;
+        }
+        Some(Launch::Parallel(
+            self.parallel
+                .iter()
+                .map(|command| Job {
+                    title: command.label(),
+                    script: command.shell.script(),
+                })
+                .collect(),
+        ))
     }
 
     /// Whether the detail view has anything to show for this entry.

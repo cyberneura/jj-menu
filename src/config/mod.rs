@@ -5,4 +5,4 @@ pub mod loader;
 pub mod model;
 
 pub use loader::{Config, load};
-pub use model::{ArgSpec, MenuItem};
+pub use model::{ArgSpec, Job, Launch, MenuItem};

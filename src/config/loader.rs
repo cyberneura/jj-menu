@@ -7,6 +7,25 @@ use anyhow::{Context, Result};
 use super::discovery;
 use super::model::{AutoLaunchers, ConfigFile, MenuItem};
 
+/// Checks that serde cannot express, run on every parsed file.
+///
+/// Only relationships *between* fields end up here; a field that is wrong on
+/// its own is rejected by the derived `Deserialize`.
+fn validate(items: &[MenuItem], path: &Path) -> Result<()> {
+    for item in items {
+        if item.shell.is_some() && !item.parallel.is_empty() {
+            anyhow::bail!(
+                "{}: entry {:?} has both `shell` and `parallel`; \
+                 use one or the other (a `shell` list already runs sequentially)",
+                path.display(),
+                item.label()
+            );
+        }
+        validate(&item.submenu, path)?;
+    }
+    Ok(())
+}
+
 /// The merged configuration used to build the menu.
 #[derive(Debug, Default)]
 pub struct Config {
@@ -65,12 +84,14 @@ pub fn parse(path: &Path, text: &str) -> Result<ConfigFile> {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    match ext.as_str() {
+    let config = match ext.as_str() {
         "yaml" | "yml" => parse_yaml(text),
         "toml" => parse_toml(text),
         "json" => parse_json(text),
         other => anyhow::bail!("unsupported configuration format: .{other}"),
-    }
+    }?;
+    validate(&config.menu, path)?;
+    Ok(config)
 }
 
 fn parse_yaml(text: &str) -> Result<ConfigFile> {
@@ -187,6 +208,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.menu[0].script().unwrap(), "cd /tmp\nls");
+    }
+
+    #[test]
+    fn parses_a_parallel_group() {
+        let config = parse_str(
+            "a.yaml",
+            "menu:\n  - title: servers\n    parallel:\n      - shell: npm run dev\n      - title: api\n        shell:\n          - cd api\n          - npm start\n",
+        )
+        .unwrap();
+        let item = &config.menu[0];
+        assert!(item.script().is_none(), "a group has no single script");
+        assert_eq!(item.parallel.len(), 2);
+        assert_eq!(item.parallel[0].label(), "npm run dev");
+        assert_eq!(item.parallel[1].label(), "api");
+        assert_eq!(item.parallel[1].shell.script(), "cd api\nnpm start");
+    }
+
+    #[test]
+    fn labels_a_parallel_group_with_its_commands_when_no_title_is_given() {
+        let config = parse_str(
+            "a.yaml",
+            "menu:\n  - parallel:\n      - shell: npm run dev\n      - shell: npm run api\n",
+        )
+        .unwrap();
+        assert_eq!(config.menu[0].label(), "npm run dev & npm run api");
+    }
+
+    #[test]
+    fn rejects_an_entry_that_is_both_sequential_and_parallel() {
+        // Which of the two Enter should run would be a guess, and a `shell`
+        // list already exists for running commands one after the other.
+        let err = parse_str(
+            "a.yaml",
+            "menu:\n  - title: t\n    shell: echo hi\n    parallel:\n      - shell: echo there\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("both `shell` and `parallel`"), "{err}");
+        assert!(err.contains("\"t\""), "the entry is named: {err}");
+    }
+
+    #[test]
+    fn rejects_the_same_entry_inside_a_submenu() {
+        assert!(
+            parse_str(
+                "a.yaml",
+                "menu:\n  - title: t\n    submenu:\n      - shell: a\n        parallel:\n          - shell: b\n",
+            )
+            .is_err(),
+            "a nested entry is loaded like any other, so it is checked like any other"
+        );
+    }
+
+    #[test]
+    fn a_parallel_command_takes_no_fields_of_its_own() {
+        // No submenu, help or args on a group member: it is not a menu level,
+        // so those would have nowhere to show up.
+        assert!(
+            parse_str(
+                "a.yaml",
+                "menu:\n  - parallel:\n      - shell: a\n        help: nope\n",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_str("a.yaml", "menu:\n  - parallel:\n      - title: no shell\n").is_err(),
+            "`shell` is what a group member is"
+        );
     }
 
     #[test]

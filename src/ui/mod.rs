@@ -15,15 +15,15 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
 
-use crate::config::MenuItem;
+use crate::config::{Job, Launch, MenuItem};
 use prompt::LineEditor;
 use state::{Frame, MenuState};
 use theme::{Style, paint_with};
 
 /// What the user picked.
 pub enum Outcome {
-    /// Run this script.
-    Run(String),
+    /// Run this, with any arguments already filled in.
+    Run(Launch),
     /// Leave without running anything.
     Cancelled,
 }
@@ -99,12 +99,12 @@ pub fn run(items: Vec<MenuItem>, title: &str) -> Result<Outcome> {
                 };
                 // A container without a command opens instead of running, so
                 // Enter never silently does nothing.
-                if item.script().is_none() {
+                if item.launch().is_none() {
                     menu.enter_detail();
                     continue;
                 }
                 match resolve(&item)? {
-                    Some(script) => return Ok(Outcome::Run(script)),
+                    Some(launch) => return Ok(Outcome::Run(launch)),
                     // Argument input was cancelled: stay in the menu.
                     None => continue,
                 }
@@ -114,13 +114,15 @@ pub fn run(items: Vec<MenuItem>, title: &str) -> Result<Outcome> {
     }
 }
 
-/// Fill in the arguments of `item` and return the script to run.
+/// Fill in the arguments of `item` and return what to run.
 ///
 /// `None` means the user cancelled while entering arguments.
-fn resolve(item: &MenuItem) -> Result<Option<String>> {
-    let script = item.script().unwrap_or_default();
+fn resolve(item: &MenuItem) -> Result<Option<Launch>> {
+    let Some(launch) = item.launch() else {
+        return Ok(None);
+    };
     if item.args.is_empty() {
-        return Ok(Some(script));
+        return Ok(Some(launch));
     }
 
     let mut values: HashMap<String, String> = HashMap::new();
@@ -133,7 +135,20 @@ fn resolve(item: &MenuItem) -> Result<Option<String>> {
         }
     }
 
-    Ok(Some(prompt::substitute(&script, &values)))
+    // The arguments belong to the entry, so every command of a parallel group
+    // gets the same values: one prompt, however many shells it starts.
+    let launch = match launch {
+        Launch::Script(script) => Launch::Script(prompt::substitute(&script, &values)),
+        Launch::Parallel(jobs) => Launch::Parallel(
+            jobs.into_iter()
+                .map(|job| Job {
+                    title: job.title,
+                    script: prompt::substitute(&job.script, &values),
+                })
+                .collect(),
+        ),
+    };
+    Ok(Some(launch))
 }
 
 /// Ask for one value. `None` means cancelled.
@@ -321,8 +336,18 @@ fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec
     }
 
     let footer = match menu.selected() {
-        Some(item) => match item.script() {
-            Some(script) => format!("$ {}", script.replace('\n', " ; ")),
+        Some(item) => match item.launch() {
+            Some(Launch::Script(script)) => format!("$ {}", one_line(&script)),
+            // `&` between the commands, the way a shell would be told to run
+            // them at once, so the status line says which of the two an entry
+            // is without spending a word on it.
+            Some(Launch::Parallel(jobs)) => format!(
+                "& {}",
+                jobs.iter()
+                    .map(|job| one_line(&job.script))
+                    .collect::<Vec<_>>()
+                    .join(" & ")
+            ),
             None => format!("> {} entries", item.submenu.len()),
         },
         None => String::new(),
@@ -358,7 +383,12 @@ fn flush(frame: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Split the two-character sigil (`*>`, `$ `, `> `) off the front of a line so
+/// A multi-line script as one status-line-sized preview.
+fn one_line(script: &str) -> String {
+    script.replace('\n', " ; ")
+}
+
+/// Split the two-character sigil (`*>`, `$ `, `> `, `& `) off the front of a line so
 /// it can be coloured on its own. Both halves may be empty on a very narrow
 /// terminal.
 fn split_marker(line: &str) -> (&str, &str) {
@@ -492,10 +522,68 @@ mod tests {
         assert_eq!(pad("abcdef", 4), "abcdef");
     }
 
+    /// The scripts a resolved entry would run, whichever kind it is.
+    fn scripts(launch: Launch) -> Vec<String> {
+        match launch {
+            Launch::Script(script) => vec![script],
+            Launch::Parallel(jobs) => jobs.into_iter().map(|job| job.script).collect(),
+        }
+    }
+
+    fn parallel_item(scripts: &[&str]) -> MenuItem {
+        MenuItem {
+            title: Some("group".into()),
+            parallel: scripts
+                .iter()
+                .map(|script| crate::config::model::ParallelCommand {
+                    title: None,
+                    shell: crate::config::model::Shell::One((*script).to_string()),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn resolves_an_entry_without_arguments_directly() {
         let item = MenuItem::command("t", "echo hi");
-        assert_eq!(resolve(&item).unwrap().unwrap(), "echo hi");
+        assert_eq!(scripts(resolve(&item).unwrap().unwrap()), ["echo hi"]);
+    }
+
+    #[test]
+    fn resolves_a_parallel_entry_into_one_job_per_command() {
+        let item = parallel_item(&["npm run dev", "npm run api"]);
+        assert_eq!(
+            scripts(resolve(&item).unwrap().unwrap()),
+            ["npm run dev", "npm run api"]
+        );
+    }
+
+    #[test]
+    fn a_parallel_entry_is_runnable_rather_than_openable() {
+        // Enter must run the group; the menu opens an entry only when there is
+        // nothing to run, and a `parallel` entry has no `shell`.
+        let item = parallel_item(&["true"]);
+        assert!(item.launch().is_some());
+        assert!(!item.has_detail());
+    }
+
+    #[test]
+    fn the_status_line_tells_a_parallel_entry_apart_from_a_single_command() {
+        let mut menu = MenuState::new(Frame::new(
+            "title",
+            vec![parallel_item(&["npm run dev", "npm run api"])],
+        ));
+        let frame = String::from_utf8(render(&mut menu, 60, 10, false).unwrap()).unwrap();
+        let text = without_escapes(&frame);
+        assert!(
+            text.contains("& npm run dev & npm run api"),
+            "the status line should show both commands: {text:?}"
+        );
+        assert!(
+            !text.contains("> 0 entries"),
+            "a parallel entry is not an empty container: {text:?}"
+        );
     }
 
     #[test]

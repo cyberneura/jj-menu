@@ -330,9 +330,12 @@ cargo fmt --check
 cargo run
 ```
 
-Releases are built by [dist](https://opensource.axo.dev/cargo-dist/) from a
-version tag, which also publishes the Homebrew formula to
-`cyberneura/homebrew-tap`.
+Releasing is changing the version in `Cargo.toml` on `main`:
+`.github/workflows/tag-on-version-change.yml` reads the version, tags the
+merge commit if that version has not been released, and
+[dist](https://opensource.axo.dev/cargo-dist/) takes it from the tag and builds
+the macOS and Linux binaries. `cyberneura/homebrew-tap` updates its own formula
+from the latest release within the hour; nothing is pushed to it from here.
 
 ## License
 

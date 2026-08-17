@@ -82,7 +82,14 @@ Ask the user to run `cargo run` when the change is visual; they have a terminal.
 
 ## Releasing
 
-`cargo-dist` (`dist-workspace.toml`) builds macOS and Linux binaries and
-publishes a Homebrew formula to `cyberneura/homebrew-tap` from
-`.github/workflows/release.yml`. Windows is deliberately not a target: a menu
-entry is a shell script run through `$SHELL -c`.
+Changing the version in `Cargo.toml` on `main` is what releases.
+`.github/workflows/tag-on-version-change.yml` tags the merge commit when that
+version has not been released -- it asks the releases API rather than reading
+the diff, so a squash, a rebase and a direct push all behave the same -- and
+`cargo-dist` (`dist-workspace.toml`, `.github/workflows/release.yml`) builds the
+macOS and Linux binaries from that tag. Windows is deliberately not a target: a
+menu entry is a shell script run through `$SHELL -c`.
+
+Nothing is pushed to `cyberneura/homebrew-tap` from here. The tap updates its
+own cask and formula files hourly from each project's latest release, which is
+what keeps a token that can write to it out of this repository.

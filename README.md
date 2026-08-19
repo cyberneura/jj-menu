@@ -81,7 +81,26 @@ jj-menu [OPTIONS]
 | `l`, `→` | Open the detail view (help, submenu) |
 | `h`, `←` | Back (leaves the menu at the top level) |
 | `Enter` | Run the entry |
-| `q`, `Esc`, `Ctrl-C` | Quit |
+| `/` | Incremental search |
+| `q`, `Ctrl-C` | Quit |
+| `Esc` | Drop the search, or quit when there is none |
+
+### Incremental search
+
+`/` narrows the list as you type: only the entries whose label contains what you
+have typed stay on screen, matched without regard to case, and the cursor sits on
+the first of them. `Enter` runs it. It is the fastest way through a long menu —
+`/dep` then `Enter`.
+
+**The letter keys are text while you are typing**, so moving around is `↑` / `↓`
+(or `Ctrl-P` / `Ctrl-N`) and `←` / `→`, none of which can be typed. `Esc` (or
+`Ctrl-C`, or backspacing past the start) drops the search and shows everything
+again, leaving the cursor on the entry it was on.
+
+The search belongs to the level it was typed on: opening a submenu starts
+unfiltered, and going back brings the filter with you. A filtered list keeps
+saying `/…` above it after the search is accepted, so a menu that is missing
+entries never looks like a menu that does not have them.
 
 Entries with a detail view are marked with `>`: those are the ones with a
 `submenu`, a `help` text, or both. The view shows the help, the entry's own

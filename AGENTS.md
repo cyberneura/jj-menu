@@ -22,7 +22,7 @@ handler, where nothing that locks may be called.
 | `src/config/` | Discovery of configuration files, loading, merging, the data model |
 | `src/launchers/` | Entries derived from `package.json`, `Makefile`, Cargo and Gradle projects |
 | `src/menu.rs` | Builds the menu from configuration plus launchers |
-| `src/ui/` | The interactive menu: `mod.rs` drawing, `state.rs` navigation, `prompt.rs` line editing, `theme.rs` colours |
+| `src/ui/` | The interactive menu: `mod.rs` drawing, `state.rs` navigation and the incremental search, `prompt.rs` line editing, `theme.rs` colours |
 | `src/exec.rs` | Running the selected script |
 | `src/parallel.rs` | Running a `parallel:` group: one shell per member, and passing Ctrl-C on to all of them |
 | `src/signal.rs` | Restoring the terminal when a signal kills the process |
@@ -67,6 +67,22 @@ of any automated check.
   escape sequences.
 - **Colours may be off** (`NO_COLOR`, `TERM=dumb`). Anything that has to stand
   out then needs `Style::highlight()`, which falls back to reverse video.
+- **The cursor is an index into what the search left, not into the entries.**
+  `Frame` keeps the full `items` plus `visible`, the indices that match the
+  query; `cursor` walks `visible`. Reading `items[cursor]` anywhere would pick
+  the wrong entry as soon as a filter is on — go through `MenuState::selected`.
+- **The search string lives on the frame, not on the menu.** That is what makes
+  a submenu open unfiltered while going back restores the parent's filter. The
+  `searching` flag in `run` is only about where typing goes.
+- **The search row is drawn in place of the blank line under the title**, so
+  turning the search on does not take a row off the list. `CHROME_ROWS` counts
+  that blank line; if the row ever moves, the height arithmetic moves with it.
+- **`Esc` is not simply quit.** The status row offers it as the way to drop a
+  filter, so outside the search it clears one when there is one and only leaves
+  the menu when there is not (`escape`). `q` and `Ctrl-C` always leave.
+- **Letters are text while the search is open**, which is why `classify_search`
+  maps movement to the arrows and to `Ctrl-N` / `Ctrl-P` only, and why the
+  search string has no cursor of its own (that would need ← and →).
 
 ## Verifying a change
 

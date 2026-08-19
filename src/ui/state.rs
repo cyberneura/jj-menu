@@ -501,6 +501,16 @@ mod tests {
     }
 
     #[test]
+    fn clearing_an_empty_query_leaves_the_cursor_alone() {
+        // Backspacing out of a search that was never typed into goes through
+        // here, and moving the selection on the way out would be a surprise.
+        let mut s = named(&["build", "deploy", "test"]);
+        s.move_last();
+        s.clear_query();
+        assert_eq!(s.selected().map(|i| i.label()).as_deref(), Some("test"));
+    }
+
+    #[test]
     fn a_submenu_starts_unfiltered_and_going_back_restores_the_filter() {
         let parent = MenuItem {
             title: Some("deploy".into()),

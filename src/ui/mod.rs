@@ -105,12 +105,17 @@ pub fn run(items: Vec<MenuItem>, title: &str) -> Result<Outcome> {
                 }
                 Search::Pop => {
                     let mut query = menu.query().to_string();
-                    if query.pop().is_none() {
+                    if query.pop().is_some() {
+                        menu.set_query(query);
+                    } else {
                         // Backspacing past the start leaves the search rather
                         // than sitting there doing nothing on every press.
+                        // Through clear_query, not set_query(""): the cursor
+                        // may have been moved while the search was open, and
+                        // leaving it is not a reason to move it back.
                         searching = false;
+                        menu.clear_query();
                     }
-                    menu.set_query(query);
                 }
                 Search::Nav(action) => apply(&mut menu, action),
                 Search::None => {}

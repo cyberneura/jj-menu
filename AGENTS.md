@@ -77,6 +77,9 @@ of any automated check.
 - **The search row is drawn in place of the blank line under the title**, so
   turning the search on does not take a row off the list. `CHROME_ROWS` counts
   that blank line; if the row ever moves, the height arithmetic moves with it.
+- **`Ctrl-C` leaves from everywhere, including the search.** It is the one key
+  that always stops what is going on; routing it to "cancel the search" would
+  make the search the single place where it does not.
 - **`Esc` is not simply quit.** The status row offers it as the way to drop a
   filter, so outside the search it clears one when there is one and only leaves
   the menu when there is not (`escape`). `q` and `Ctrl-C` always leave.

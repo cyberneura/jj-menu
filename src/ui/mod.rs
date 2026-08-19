@@ -86,10 +86,12 @@ pub fn run(items: Vec<MenuItem>, title: &str) -> Result<Outcome> {
 
         if searching {
             match classify_search(&key) {
+                Search::Quit => return Ok(Outcome::Cancelled),
                 Search::Cancel => {
                     searching = false;
                     menu.clear_query();
                 }
+                Search::Clear => menu.set_query(String::new()),
                 Search::Accept => {
                     searching = false;
                     if let Some(outcome) = select(&mut menu)? {
@@ -293,6 +295,10 @@ enum Search {
     Accept,
     /// Drop the search and show everything again.
     Cancel,
+    /// Empty the search string without leaving the search.
+    Clear,
+    /// Leave the menu outright.
+    Quit,
     /// Move around without leaving the search.
     Nav(Action),
     None,
@@ -334,11 +340,17 @@ fn classify_search(key: &KeyEvent) -> Search {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        KeyCode::Char('c') if ctrl => Search::Cancel,
+        // Ctrl-C leaves, wherever it is pressed. Making it mean "cancel the
+        // search" would be the one place in the program where it does not stop
+        // what is going on, which is not a distinction worth spending on a
+        // filter that Esc already drops.
+        KeyCode::Char('c') if ctrl => Search::Quit,
         KeyCode::Esc => Search::Cancel,
         KeyCode::Enter => Search::Accept,
         KeyCode::Backspace => Search::Pop,
-        KeyCode::Char('u') if ctrl => Search::Cancel,
+        // Readline's "clear the line": empties what was typed and stays here,
+        // the same as it does at the argument prompt.
+        KeyCode::Char('u') if ctrl => Search::Clear,
         KeyCode::Char('n') if ctrl => Search::Nav(Action::Down),
         KeyCode::Char('p') if ctrl => Search::Nav(Action::Up),
         KeyCode::Down => Search::Nav(Action::Down),
@@ -1098,7 +1110,10 @@ mod tests {
             classify_search(&key(KeyCode::Esc)),
             Search::Cancel
         ));
-        assert!(matches!(classify_search(&ctrl('c')), Search::Cancel));
+        // Ctrl-C leaves from here too: it is the one key that always stops
+        // what is going on, and a search is not an exception to that.
+        assert!(matches!(classify_search(&ctrl('c')), Search::Quit));
+        assert!(matches!(classify_search(&ctrl('u')), Search::Clear));
         assert!(matches!(
             classify_search(&key(KeyCode::Enter)),
             Search::Accept

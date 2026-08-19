@@ -94,8 +94,9 @@ the first of them. `Enter` runs it. It is the fastest way through a long menu �
 
 **The letter keys are text while you are typing**, so moving around is `↑` / `↓`
 (or `Ctrl-P` / `Ctrl-N`) and `←` / `→`, none of which can be typed. `Esc` (or
-`Ctrl-C`, or backspacing past the start) drops the search and shows everything
-again, leaving the cursor on the entry it was on.
+backspacing past the start) drops the search and shows everything again, leaving
+the cursor on the entry it was on; `Ctrl-U` empties what you typed without
+leaving the search. `Ctrl-C` quits the menu, from here as from anywhere else.
 
 The search belongs to the level it was typed on: opening a submenu starts
 unfiltered, and going back brings the filter with you. A filtered list keeps

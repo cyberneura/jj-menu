@@ -225,8 +225,15 @@ fn classify(key: &KeyEvent) -> Action {
     }
 }
 
-/// Rows reserved around the list: title, blank line, and the footer.
-const CHROME_ROWS: u16 = 3;
+/// Rows reserved around the list besides the footer: the title and the blank
+/// line under it.
+const CHROME_ROWS: u16 = 2;
+
+/// How many rows the status line may grow to when the command does not fit on
+/// one. Ten is enough for the scripts that motivated this (a deploy pipeline
+/// written as several commands) while still leaving a short terminal a list to
+/// scroll; past that the rest is cut.
+const MAX_FOOTER_ROWS: u16 = 10;
 
 fn draw(menu: &mut MenuState) -> Result<()> {
     let (cols, rows) = terminal_size();
@@ -242,7 +249,13 @@ fn draw(menu: &mut MenuState) -> Result<()> {
 /// modes — and the fallback for the other one is exactly what needs guarding.
 fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec<u8>> {
     let help_rows = menu.frame().help.as_ref().map_or(0, |_| 2);
-    let list_height = rows.saturating_sub(CHROME_ROWS + help_rows).max(1) as usize;
+    // The status line is laid out before the list, because how many rows it
+    // takes is what the list has left to work with.
+    let footer_lines = wrap(&footer_text(menu), cols, footer_budget(rows, help_rows));
+    let footer_rows = footer_lines.len() as u16;
+    let list_height = rows
+        .saturating_sub(CHROME_ROWS + help_rows + footer_rows)
+        .max(1) as usize;
     menu.scroll_into_view(list_height);
 
     // The whole frame is built in memory and written once. `stderr` is
@@ -337,7 +350,47 @@ fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec
         writeln!(out, "\r")?;
     }
 
-    let footer = match menu.selected() {
+    // The status line sits at the bottom of the screen and grows upwards, so a
+    // command too long for one row is readable instead of cut at the edge.
+    let first_row = rows.saturating_sub(footer_rows);
+    for (index, line) in footer_lines.iter().enumerate() {
+        execute!(out, cursor::MoveTo(0, first_row + index as u16))?;
+        let line = pad(line, cols);
+        if index == 0 {
+            // Only the first row carries the sigil, and only there is it
+            // painted apart from the text.
+            let (sigil, rest) = split_marker(&line);
+            paint_with(
+                color,
+                &mut out,
+                Style::fg(theme::COMMAND)
+                    .on(theme::FOOTER_BG)
+                    .bold()
+                    .highlight(),
+                sigil,
+            )?;
+            paint_with(
+                color,
+                &mut out,
+                Style::fg(theme::FOOTER_FG).on(theme::FOOTER_BG).highlight(),
+                rest,
+            )?;
+        } else {
+            paint_with(
+                color,
+                &mut out,
+                Style::fg(theme::FOOTER_FG).on(theme::FOOTER_BG).highlight(),
+                &line,
+            )?;
+        }
+    }
+
+    Ok(out)
+}
+
+/// What the status line says about the selected entry.
+fn footer_text(menu: &MenuState) -> String {
+    match menu.selected() {
         Some(item) => match item.launch() {
             Some(Launch::Script(script)) => format!("$ {}", one_line(&script)),
             // `&` between the commands, the way a shell would be told to run
@@ -353,27 +406,63 @@ fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec
             None => format!("> {} entries", item.submenu.len()),
         },
         None => String::new(),
-    };
-    let footer = pad(&truncate(&footer, cols), cols);
-    let (sigil, rest) = split_marker(&footer);
-    execute!(out, cursor::MoveTo(0, rows.saturating_sub(1)))?;
-    paint_with(
-        color,
-        &mut out,
-        Style::fg(theme::COMMAND)
-            .on(theme::FOOTER_BG)
-            .bold()
-            .highlight(),
-        sigil,
-    )?;
-    paint_with(
-        color,
-        &mut out,
-        Style::fg(theme::FOOTER_FG).on(theme::FOOTER_BG).highlight(),
-        rest,
-    )?;
+    }
+}
 
-    Ok(out)
+/// How many rows the status line may use on a terminal this tall.
+///
+/// Capped by [`MAX_FOOTER_ROWS`], by half the screen, and by what is left once
+/// the title, the blank line, the help text and one row of list have been
+/// taken: a status line that grew into those would paint over them. Always at
+/// least one, so the line exists even on a terminal too short for the rest —
+/// which is what the previous single-row status line did.
+fn footer_budget(rows: u16, help_rows: u16) -> u16 {
+    let spare = rows.saturating_sub(CHROME_ROWS + help_rows + 1);
+    MAX_FOOTER_ROWS.min(rows / 2).min(spare).max(1)
+}
+
+/// Break `text` into at most `max_rows` rows of at most `cols` columns.
+///
+/// Rows are cut at whatever cluster reaches the width — a command has no
+/// spaces to prefer, and breaking a path or a flag at a space it happens to
+/// contain would read as two arguments. What does not fit in `max_rows` is
+/// dropped: the status line is a preview, and the entry itself is the source
+/// of truth for what will run.
+///
+/// Always returns at least one row, so the caller can reserve a status line
+/// whether or not anything is selected.
+fn wrap(text: &str, cols: u16, max_rows: u16) -> Vec<String> {
+    // Sanitized once, up front: doing it per row and then slicing the original
+    // by the row's byte length would drift, because a control character and
+    // the `·` that replaces it are not the same number of bytes.
+    let sanitized: String = sanitize(text).collect();
+    let max = cols.saturating_sub(1) as usize;
+
+    let mut rows = Vec::new();
+    let mut rest = sanitized.as_str();
+    while !rest.is_empty() && (rows.len() as u16) < max_rows {
+        let mut end = 0;
+        let mut width = 0;
+        for cluster in rest.graphemes(true) {
+            let advance = UnicodeWidthStr::width(cluster);
+            if width + advance > max {
+                break;
+            }
+            end += cluster.len();
+            width += advance;
+        }
+        if end == 0 {
+            // Nothing fits — a terminal one column wide, or a cluster wider
+            // than the whole line. Stop rather than loop forever.
+            break;
+        }
+        rows.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
 }
 
 /// Send a frame built by [`render`] or [`draw_prompt`] to the terminal in one
@@ -582,6 +671,127 @@ mod tests {
                 "a padded row must fill the line exactly once: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_long_command_is_wrapped_instead_of_cut() {
+        let command = "$ ".to_string() + &"deploy --target production ".repeat(6);
+        let rows = wrap(&command, 40, 10);
+
+        assert!(rows.len() > 1, "a long command should use several rows");
+        assert!(
+            rows.iter().all(|row| display_width(row) <= 39),
+            "no row may run past the edge: {rows:?}"
+        );
+        // Nothing is lost between the rows.
+        assert_eq!(rows.concat(), command);
+    }
+
+    #[test]
+    fn wrapping_stops_at_the_row_budget() {
+        let command = "x".repeat(1000);
+        let rows = wrap(&command, 40, 10);
+
+        assert_eq!(rows.len(), 10);
+        // Beyond the budget the rest is dropped, not squeezed in.
+        assert_eq!(rows.concat().chars().count(), 10 * 39);
+    }
+
+    #[test]
+    fn wrapping_replaces_control_characters_without_losing_the_rest() {
+        // The replacement is a different length in bytes from what it replaces,
+        // so a wrap that sliced the original text by the row's byte length
+        // would drift into the middle of a character.
+        let command = format!("$ echo {}", "a\u{1}".repeat(30));
+        let rows = wrap(&command, 20, 10);
+
+        assert!(rows.iter().all(|row| display_width(row) <= 19), "{rows:?}");
+        assert!(!rows.concat().contains('\u{1}'), "{rows:?}");
+        assert_eq!(rows.concat(), sanitize(&command).collect::<String>());
+    }
+
+    #[test]
+    fn a_short_command_still_uses_one_row() {
+        assert_eq!(wrap("$ ls", 40, 10), vec!["$ ls".to_string()]);
+        assert_eq!(wrap("", 40, 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn the_status_line_leaves_the_list_something_to_show() {
+        // A tall terminal: the cap is the one the task asked for.
+        assert_eq!(footer_budget(24, 0), 10);
+        assert_eq!(footer_budget(24, 2), 10);
+        // Half the screen, and never into the title, the help or the last row
+        // of list.
+        assert_eq!(footer_budget(10, 0), 5);
+        assert_eq!(footer_budget(10, 2), 5);
+        assert_eq!(footer_budget(8, 2), 3);
+        // Too short for all of it: the status line keeps the single row it had
+        // before this change.
+        assert_eq!(footer_budget(4, 2), 1);
+        assert_eq!(footer_budget(3, 0), 1);
+        assert_eq!(footer_budget(1, 0), 1);
+    }
+
+    #[test]
+    fn a_wrapped_status_line_never_paints_outside_the_screen() {
+        // The rows the frame moves the cursor to, from the CSI sequences.
+        fn rows_painted(frame: &str) -> Vec<u16> {
+            let mut rows = Vec::new();
+            for part in frame.split('\u{1b}') {
+                // `[<row>;<col>H`, one-based.
+                if let Some(rest) = part.strip_prefix('[') {
+                    if let Some((row, tail)) = rest.split_once(';') {
+                        if tail.contains('H') {
+                            if let Ok(row) = row.parse::<u16>() {
+                                rows.push(row - 1);
+                            }
+                        }
+                    }
+                }
+            }
+            rows
+        }
+
+        for rows in [4u16, 6, 10, 24] {
+            for help in [None, Some("some help".to_string())] {
+                let mut menu = menu_with_long_command(help.clone());
+                let frame = render(&mut menu, 30, rows, false).unwrap();
+                let frame = String::from_utf8(frame).unwrap();
+
+                assert!(
+                    rows_painted(&frame).iter().all(|row| *row < rows),
+                    "the frame painted past the last row (rows={rows}, help={help:?})"
+                );
+                // Below six rows the frame is taller than the terminal
+                // whatever the status line does — title, blank, help and one
+                // row of list already do not fit — so only the sizes where the
+                // layout has room are checked here.
+                if rows >= 6 {
+                    assert!(
+                        without_escapes(&frame).lines().count() <= rows as usize + 1,
+                        "the frame is taller than the terminal (rows={rows}, help={help:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A menu whose only entry runs a command far too long for one row,
+    /// optionally with help text (which reserves rows of its own).
+    fn menu_with_long_command(help: Option<String>) -> MenuState {
+        use crate::config::model::Shell;
+
+        let item = MenuItem {
+            title: Some("deploy".into()),
+            shell: Some(Shell::One(
+                "deploy --target production --and-then-some ".repeat(4),
+            )),
+            ..MenuItem::default()
+        };
+        let mut frame = Frame::new("title", vec![item]);
+        frame.help = help;
+        MenuState::new(frame)
     }
 
     #[test]

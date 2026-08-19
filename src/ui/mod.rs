@@ -14,6 +14,8 @@ use std::io::{Write, stderr};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::{Job, Launch, MenuItem};
 use prompt::LineEditor;
@@ -270,7 +272,7 @@ fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec
         paint_with(
             color,
             &mut out,
-            Style::fg(theme::MUTED),
+            Style::fg(theme::HELP),
             &truncate(help, cols),
         )?;
         writeln!(out, "\r")?;
@@ -447,7 +449,7 @@ fn cursor_marker(selected: bool) -> &'static str {
     if selected { "*>" } else { "  " }
 }
 
-/// Cut a line to the terminal width, counting characters rather than bytes.
+/// Cut a line to the terminal width.
 ///
 /// Control characters are removed first: labels can come from a file in the
 /// checkout (an npm script name, a make target), and a JSON string can carry a
@@ -455,12 +457,44 @@ fn cursor_marker(selected: bool) -> &'static str {
 /// the menu in an untrusted repository run terminal escape sequences — OSC
 /// clipboard writes, cursor moves — without anything being selected.
 ///
-/// This is not display-width aware: a wide character (CJK, emoji) counts as
-/// one, so a line of wide characters is cut later than it ideally would be.
-/// Erring on the side of cutting late keeps ASCII, the common case, exact.
+/// Cut `text` to what fits in `cols`, **measured in terminal columns**.
+///
+/// Not in `char`s: a CJK character occupies two columns, so a row of Japanese
+/// counted by `char` is twice as wide as the terminal thinks it asked for. The
+/// row then wraps, and for the selected row — which is padded to the full width
+/// and painted with a background — the wrap shows up as a second, half-filled
+/// bar under it.
+///
+/// One column is left unused at the right edge: writing into the last cell
+/// leaves the cursor in a "pending wrap" state that some terminals resolve into
+/// a blank line of their own.
 fn truncate(text: &str, cols: u16) -> String {
     let max = cols.saturating_sub(1) as usize;
-    sanitize(text).take(max).collect()
+    let sanitized: String = sanitize(text).collect();
+    let mut out = String::new();
+    let mut width = 0;
+    for cluster in sanitized.graphemes(true) {
+        let advance = UnicodeWidthStr::width(cluster);
+        if width + advance > max {
+            break;
+        }
+        out.push_str(cluster);
+        width += advance;
+    }
+    out
+}
+
+/// How many terminal columns a string takes.
+///
+/// Measured per grapheme cluster, not per `char`. Summing characters gets the
+/// combined forms wrong in both directions: an emoji built from several code
+/// points (a ZWJ sequence, a skin-tone modifier) would be counted once per
+/// piece, and a base character followed by a variation selector — `❤️` — would
+/// be counted as the one-column text form the terminal does not draw. Cutting
+/// at a cluster boundary also keeps a modifier from being left behind without
+/// the character it modifies.
+fn display_width(text: &str) -> usize {
+    text.graphemes(true).map(UnicodeWidthStr::width).sum()
 }
 
 /// Replace every control character with `·` so it cannot reach the terminal
@@ -476,9 +510,10 @@ fn sanitize(text: &str) -> impl Iterator<Item = char> + '_ {
     })
 }
 
+/// Fill `text` out to `cols`, measured in terminal columns (see [`truncate`]).
 fn pad(text: &str, cols: u16) -> String {
     let width = cols.saturating_sub(1) as usize;
-    let len = text.chars().count();
+    let len = display_width(text);
     if len >= width {
         return text.to_string();
     }
@@ -499,10 +534,60 @@ mod tests {
     }
 
     #[test]
-    fn truncates_by_character_count() {
+    fn truncates_by_terminal_columns() {
         assert_eq!(truncate("abcdef", 4), "abc");
         assert_eq!(truncate("abc", 80), "abc");
-        assert_eq!(truncate("日本語です", 4), "日本語");
+        // Two columns per character, and one column is held back at the right
+        // edge: 4 columns fit one of these, not three.
+        assert_eq!(truncate("日本語です", 4), "日");
+        assert_eq!(truncate("日本語です", 8), "日本語");
+        // A character that would straddle the last usable column is dropped
+        // whole rather than half-drawn.
+        assert_eq!(truncate("a日本", 4), "a日");
+    }
+
+    #[test]
+    fn measures_and_cuts_by_grapheme_cluster() {
+        // Each of these is one cluster the terminal draws two columns wide,
+        // however many code points it is made of.
+        for cluster in ["❤\u{fe0f}", "👨\u{200d}👩\u{200d}👧", "🧑🏽", "🇯🇵"] {
+            assert_eq!(display_width(cluster), 2, "{cluster:?}");
+            // Too narrow to hold it: dropped whole, never split into the
+            // pieces it is built from.
+            assert_eq!(truncate(cluster, 2), "", "{cluster:?}");
+            assert_eq!(truncate(cluster, 3), cluster, "{cluster:?}");
+        }
+
+        // A combining mark stays with the character it modifies.
+        assert_eq!(display_width("a\u{301}"), 1);
+        assert_eq!(truncate("a\u{301}b", 3), "a\u{301}b");
+    }
+
+    #[test]
+    fn a_padded_row_is_exactly_one_line_wide() {
+        // The bug this guards: with `char`-counted padding a row of Japanese
+        // came out twice as wide as the terminal, so the selected row's
+        // background wrapped onto a second line (CYBERNEURA-DEV-514).
+        for text in [
+            "backend の環境変数を SSM から反映して再起動 >",
+            "ascii only",
+            "",
+            "日",
+            "deploy 🚀 ❤\u{fe0f} 👨\u{200d}👩\u{200d}👧",
+        ] {
+            let line = pad(&truncate(text, 40), 40);
+            assert_eq!(
+                display_width(&line),
+                39,
+                "a padded row must fill the line exactly once: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn padding_leaves_a_row_that_is_already_full_alone() {
+        let full = "x".repeat(39);
+        assert_eq!(pad(&full, 40), full);
     }
 
     #[test]

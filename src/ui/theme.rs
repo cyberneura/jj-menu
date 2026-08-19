@@ -20,8 +20,12 @@ use crossterm::style::{Attribute, Color, SetAttribute, SetBackgroundColor, SetFo
 
 /// Menu title.
 pub const TITLE: Color = Color::Cyan;
-/// Breadcrumb hint and help text: present, but out of the way.
+/// Breadcrumb hint: present, but out of the way.
 pub const MUTED: Color = Color::DarkGrey;
+/// Help text. Out of the way like [`MUTED`], but a step brighter: help is
+/// meant to be read, and DarkGrey (ANSI bright black) sits close enough to a
+/// dark terminal background to be hard to make out.
+pub const HELP: Color = Color::Grey;
 /// Entries with a detail view — a submenu, a help text, or both — so a
 /// container is distinguishable from a plain command before the cursor
 /// reaches it.

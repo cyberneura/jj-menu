@@ -68,9 +68,13 @@ impl Drop for TerminalGuard {
 pub fn run(items: Vec<MenuItem>, title: &str) -> Result<Outcome> {
     let _guard = TerminalGuard::enter()?;
     let mut menu = MenuState::new(Frame::new(title, items));
+    // Whether typing goes into the search string instead of being read as
+    // shortcuts. The string itself lives on the frame, so a submenu opened
+    // from a filtered list starts unfiltered and going back restores it.
+    let mut searching = false;
 
     loop {
-        draw(&mut menu)?;
+        draw(&mut menu, searching)?;
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -80,40 +84,119 @@ pub fn run(items: Vec<MenuItem>, title: &str) -> Result<Outcome> {
             continue;
         }
 
+        if searching {
+            match classify_search(&key) {
+                Search::Quit => return Ok(Outcome::Cancelled),
+                Search::Cancel => {
+                    searching = false;
+                    menu.clear_query();
+                }
+                Search::Clear => menu.set_query(String::new()),
+                Search::Accept => {
+                    searching = false;
+                    if let Some(outcome) = select(&mut menu)? {
+                        return Ok(outcome);
+                    }
+                }
+                Search::Push(c) => {
+                    let mut query = menu.query().to_string();
+                    query.push(c);
+                    menu.set_query(query);
+                }
+                Search::Pop => {
+                    let mut query = menu.query().to_string();
+                    if query.pop().is_some() {
+                        menu.set_query(query);
+                    } else {
+                        // Backspacing past the start leaves the search rather
+                        // than sitting there doing nothing on every press.
+                        // Through clear_query, not set_query(""): the cursor
+                        // may have been moved while the search was open, and
+                        // leaving it is not a reason to move it back.
+                        searching = false;
+                        menu.clear_query();
+                    }
+                }
+                Search::Nav(action) => apply(&mut menu, action),
+                Search::None => {}
+            }
+            continue;
+        }
+
         match classify(&key) {
+            Action::Search => {
+                // Resumes the existing string rather than clearing it, so a
+                // filter can be refined after looking at what it left.
+                searching = true;
+            }
             Action::Quit => return Ok(Outcome::Cancelled),
-            Action::Down => menu.move_down(),
-            Action::Up => menu.move_up(),
-            Action::First => menu.move_first(),
-            Action::Last => menu.move_last(),
-            Action::Back => {
-                if !menu.leave_detail() {
-                    return Ok(Outcome::Cancelled);
+            Action::Cancel => {
+                if let Some(outcome) = escape(&mut menu) {
+                    return Ok(outcome);
                 }
             }
-            Action::Forward => {
-                // The detail view is where help, submenus and arguments live.
-                menu.enter_detail();
-            }
+            // At the root there is nothing to go back to, so back is a way
+            // out. Inside a search it only pops a level -- leaving the menu
+            // on a keystroke that is next to the text being typed would be
+            // too easy to hit by accident.
+            Action::Back if menu.depth() == 1 => return Ok(Outcome::Cancelled),
             Action::Select => {
-                let Some(item) = menu.selected().cloned() else {
-                    continue;
-                };
-                // A container without a command opens instead of running, so
-                // Enter never silently does nothing.
-                if item.launch().is_none() {
-                    menu.enter_detail();
-                    continue;
-                }
-                match resolve(&item)? {
-                    Some(launch) => return Ok(Outcome::Run(launch)),
-                    // Argument input was cancelled: stay in the menu.
-                    None => continue,
+                if let Some(outcome) = select(&mut menu)? {
+                    return Ok(outcome);
                 }
             }
-            Action::None => {}
+            action => apply(&mut menu, action),
         }
     }
+}
+
+/// Apply a movement to the menu. `Select`, `Quit` and `Search` are decided by
+/// the caller, which is the only place that can leave the loop or change mode.
+fn apply(menu: &mut MenuState, action: Action) {
+    match action {
+        Action::Down => menu.move_down(),
+        Action::Up => menu.move_up(),
+        Action::First => menu.move_first(),
+        Action::Last => menu.move_last(),
+        Action::Back => {
+            menu.leave_detail();
+        }
+        Action::Forward => {
+            // The detail view is where help, submenus and arguments live.
+            menu.enter_detail();
+        }
+        Action::Quit | Action::Select | Action::Search | Action::Cancel | Action::None => {}
+    }
+}
+
+/// What Esc does outside the search.
+///
+/// A search that has been accepted leaves its filter on, and the status row
+/// says `Esc to clear`. Quitting there instead would close the menu on a key
+/// the screen had just offered as "show me the rest again".
+///
+/// `Some` means leave the menu.
+fn escape(menu: &mut MenuState) -> Option<Outcome> {
+    if menu.query().is_empty() {
+        return Some(Outcome::Cancelled);
+    }
+    menu.clear_query();
+    None
+}
+
+/// Run what the cursor is on. `None` means stay in the menu.
+fn select(menu: &mut MenuState) -> Result<Option<Outcome>> {
+    let Some(item) = menu.selected().cloned() else {
+        return Ok(None);
+    };
+    // A container without a command opens instead of running, so Enter never
+    // silently does nothing.
+    if item.launch().is_none() {
+        menu.enter_detail();
+        return Ok(None);
+    }
+    // Argument input was cancelled: stay in the menu.
+    Ok(resolve(&item)?.map(Outcome::Run))
 }
 
 /// Fill in the arguments of `item` and return what to run.
@@ -199,7 +282,30 @@ enum Action {
     Forward,
     Back,
     Select,
+    /// Start typing an incremental search.
+    Search,
+    /// Esc: drop the search if there is one, otherwise leave the menu.
+    Cancel,
     Quit,
+    None,
+}
+
+/// A key press while the incremental search is being typed.
+enum Search {
+    /// Add a character to the search string.
+    Push(char),
+    /// Remove the last character; on an empty string, leave the search.
+    Pop,
+    /// Run what the cursor is on.
+    Accept,
+    /// Drop the search and show everything again.
+    Cancel,
+    /// Empty the search string without leaving the search.
+    Clear,
+    /// Leave the menu outright.
+    Quit,
+    /// Move around without leaving the search.
+    Nav(Action),
     None,
 }
 
@@ -219,9 +325,48 @@ fn classify(key: &KeyEvent) -> Action {
         KeyCode::Char('h') | KeyCode::Left => Action::Back,
         KeyCode::Char('g') | KeyCode::Home => Action::First,
         KeyCode::Char('G') | KeyCode::End => Action::Last,
-        KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
+        KeyCode::Char('q') => Action::Quit,
+        // Esc is not simply quit: the status row offers it as the way to drop
+        // a filter, so it has to mean that while one is on screen.
+        KeyCode::Esc => Action::Cancel,
+        KeyCode::Char('/') => Action::Search,
         KeyCode::Enter => Action::Select,
         _ => Action::None,
+    }
+}
+
+/// Map a key press to what it means while the search is being typed.
+///
+/// **Letters are text here, so the vi keys are not available**: moving around
+/// is the arrows and the readline motions, which cannot be typed. The search
+/// string has no cursor of its own for the same reason — it is only appended
+/// to and backspaced — which is what leaves ← and → free to walk the menu.
+fn classify_search(key: &KeyEvent) -> Search {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        // Ctrl-C leaves, wherever it is pressed. Making it mean "cancel the
+        // search" would be the one place in the program where it does not stop
+        // what is going on, which is not a distinction worth spending on a
+        // filter that Esc already drops.
+        KeyCode::Char('c') if ctrl => Search::Quit,
+        KeyCode::Esc => Search::Cancel,
+        KeyCode::Enter => Search::Accept,
+        KeyCode::Backspace => Search::Pop,
+        // Readline's "clear the line": empties what was typed and stays here,
+        // the same as it does at the argument prompt.
+        KeyCode::Char('u') if ctrl => Search::Clear,
+        KeyCode::Char('n') if ctrl => Search::Nav(Action::Down),
+        KeyCode::Char('p') if ctrl => Search::Nav(Action::Up),
+        KeyCode::Down => Search::Nav(Action::Down),
+        KeyCode::Up => Search::Nav(Action::Up),
+        KeyCode::Right => Search::Nav(Action::Forward),
+        KeyCode::Left => Search::Nav(Action::Back),
+        KeyCode::Home => Search::Nav(Action::First),
+        KeyCode::End => Search::Nav(Action::Last),
+        // Any modifier combination other than shift is a shortcut, not text.
+        KeyCode::Char(c) if !ctrl && !alt => Search::Push(c),
+        _ => Search::None,
     }
 }
 
@@ -235,9 +380,9 @@ const CHROME_ROWS: u16 = 2;
 /// scroll; past that the rest is cut.
 const MAX_FOOTER_ROWS: u16 = 10;
 
-fn draw(menu: &mut MenuState) -> Result<()> {
+fn draw(menu: &mut MenuState, searching: bool) -> Result<()> {
     let (cols, rows) = terminal_size();
-    let frame = render(menu, cols, rows, theme::enabled())?;
+    let frame = render(menu, cols, rows, theme::enabled(), searching)?;
     flush(&frame)
 }
 
@@ -247,7 +392,13 @@ fn draw(menu: &mut MenuState) -> Result<()> {
 /// `color` is passed in rather than read inside: [`theme::enabled`] is decided
 /// once per process, so a test could otherwise only ever see one of the two
 /// modes — and the fallback for the other one is exactly what needs guarding.
-fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec<u8>> {
+fn render(
+    menu: &mut MenuState,
+    cols: u16,
+    rows: u16,
+    color: bool,
+    searching: bool,
+) -> Result<Vec<u8>> {
     let help_rows = menu.frame().help.as_ref().map_or(0, |_| 2);
     // The status line is laid out before the list, because how many rows it
     // takes is what the list has left to work with.
@@ -291,10 +442,27 @@ fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec
         writeln!(out, "\r")?;
         writeln!(out, "\r")?;
     }
+    // The search line takes the place of the blank row under the title rather
+    // than adding one, so turning the search on does not shorten the list.
+    if searching || !menu.query().is_empty() {
+        paint_with(
+            color,
+            &mut out,
+            Style::fg(theme::COMMAND).bold(),
+            &truncate(&search_line(menu.query(), searching), cols),
+        )?;
+    }
     writeln!(out, "\r")?;
 
     if menu.is_empty() {
-        paint_with(color, &mut out, Style::fg(theme::MUTED), "  (no entries)")?;
+        let empty = if menu.query().is_empty() {
+            "  (no entries)"
+        } else {
+            // Saying which of the two it is saves the reader wondering whether
+            // the menu is empty or the filter is just too narrow.
+            "  (no matches)"
+        };
+        paint_with(color, &mut out, Style::fg(theme::MUTED), empty)?;
         writeln!(out, "\r")?;
     }
 
@@ -386,6 +554,20 @@ fn render(menu: &mut MenuState, cols: u16, rows: u16, color: bool) -> Result<Vec
     }
 
     Ok(out)
+}
+
+/// The search row: the string being typed, or what a finished search left.
+///
+/// The trailing block is a cursor for a line that has none of its own — the
+/// real cursor is hidden while the menu is open. Once the search is accepted
+/// the row stays, without the block, because a filtered list that looked
+/// unfiltered would be the worst outcome here.
+fn search_line(query: &str, searching: bool) -> String {
+    if searching {
+        format!("  /{query}\u{2588}")
+    } else {
+        format!("  /{query}  (Esc to clear)")
+    }
 }
 
 /// What the status line says about the selected entry.
@@ -756,7 +938,7 @@ mod tests {
         for rows in [4u16, 6, 10, 24] {
             for help in [None, Some("some help".to_string())] {
                 let mut menu = menu_with_long_command(help.clone());
-                let frame = render(&mut menu, 30, rows, false).unwrap();
+                let frame = render(&mut menu, 30, rows, false, false).unwrap();
                 let frame = String::from_utf8(frame).unwrap();
 
                 assert!(
@@ -869,7 +1051,7 @@ mod tests {
             "title",
             vec![parallel_item(&["npm run dev", "npm run api"])],
         ));
-        let frame = String::from_utf8(render(&mut menu, 60, 10, false).unwrap()).unwrap();
+        let frame = String::from_utf8(render(&mut menu, 60, 10, false, false).unwrap()).unwrap();
         let text = without_escapes(&frame);
         assert!(
             text.contains("& npm run dev & npm run api"),
@@ -896,8 +1078,145 @@ mod tests {
         assert!(matches!(classify(&key(KeyCode::Char('h'))), Action::Back));
         assert!(matches!(classify(&key(KeyCode::Left)), Action::Back));
         assert!(matches!(classify(&key(KeyCode::Char('q'))), Action::Quit));
-        assert!(matches!(classify(&key(KeyCode::Esc)), Action::Quit));
+        assert!(matches!(classify(&key(KeyCode::Esc)), Action::Cancel));
         assert!(matches!(classify(&key(KeyCode::Enter)), Action::Select));
+    }
+
+    #[test]
+    fn slash_starts_the_search_and_letters_are_text_inside_it() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        assert!(matches!(classify(&key(KeyCode::Char('/'))), Action::Search));
+
+        // The vi keys are text once the search is open; that is the whole
+        // reason the arrows and the readline motions still navigate.
+        assert!(matches!(
+            classify_search(&key(KeyCode::Char('j'))),
+            Search::Push('j')
+        ));
+        assert!(matches!(
+            classify_search(&key(KeyCode::Char('q'))),
+            Search::Push('q')
+        ));
+        assert!(matches!(
+            classify_search(&key(KeyCode::Down)),
+            Search::Nav(Action::Down)
+        ));
+        assert!(matches!(
+            classify_search(&ctrl('n')),
+            Search::Nav(Action::Down)
+        ));
+        assert!(matches!(
+            classify_search(&key(KeyCode::Right)),
+            Search::Nav(Action::Forward)
+        ));
+        assert!(matches!(
+            classify_search(&key(KeyCode::Esc)),
+            Search::Cancel
+        ));
+        // Ctrl-C leaves from here too: it is the one key that always stops
+        // what is going on, and a search is not an exception to that.
+        assert!(matches!(classify_search(&ctrl('c')), Search::Quit));
+        assert!(matches!(classify_search(&ctrl('u')), Search::Clear));
+        assert!(matches!(
+            classify_search(&key(KeyCode::Enter)),
+            Search::Accept
+        ));
+        assert!(matches!(
+            classify_search(&key(KeyCode::Backspace)),
+            Search::Pop
+        ));
+    }
+
+    #[test]
+    fn the_search_row_replaces_the_blank_line_rather_than_taking_a_row() {
+        // Both entries match, so the two frames list the same number of rows
+        // and any difference in height is the chrome.
+        let items = vec![
+            MenuItem::command("deploy", "echo deploy"),
+            MenuItem::command("develop", "echo develop"),
+        ];
+        let rows = 10;
+
+        let mut plain = MenuState::new(Frame::new("title", items.clone()));
+        let plain = without_escapes(
+            &String::from_utf8(render(&mut plain, 40, rows, false, false).unwrap()).unwrap(),
+        );
+
+        let mut searching = MenuState::new(Frame::new("title", items));
+        searching.set_query("de".into());
+        let searched = without_escapes(
+            &String::from_utf8(render(&mut searching, 40, rows, false, true).unwrap()).unwrap(),
+        );
+
+        assert!(searched.contains("/de"), "the search string: {searched:?}");
+        assert!(
+            searched.contains("deploy") && searched.contains("develop"),
+            "both entries match this query: {searched:?}"
+        );
+        // The row count is what proves the search line cost the list nothing.
+        assert_eq!(
+            plain.lines().count(),
+            searched.lines().count(),
+            "the search row takes the place of the blank line under the title"
+        );
+    }
+
+    #[test]
+    fn escape_drops_the_filter_before_it_leaves_the_menu() {
+        let mut menu = MenuState::new(Frame::new(
+            "title",
+            vec![
+                MenuItem::command("build", "echo build"),
+                MenuItem::command("deploy", "echo deploy"),
+            ],
+        ));
+        menu.set_query("de".into());
+
+        // The status row says "Esc to clear" here, so Esc has to clear.
+        assert!(escape(&mut menu).is_none());
+        assert_eq!(menu.query(), "");
+        assert_eq!(menu.items().len(), 2);
+
+        // With nothing to clear it is the way out, as it always was.
+        assert!(matches!(escape(&mut menu), Some(Outcome::Cancelled)));
+    }
+
+    #[test]
+    fn says_when_a_search_matched_nothing() {
+        let mut menu = MenuState::new(Frame::new(
+            "title",
+            vec![MenuItem::command("build", "echo build")],
+        ));
+        menu.set_query("zzz".into());
+        let text = without_escapes(
+            &String::from_utf8(render(&mut menu, 40, 10, false, true).unwrap()).unwrap(),
+        );
+        assert!(
+            text.contains("(no matches)"),
+            "an empty result is not an empty menu: {text:?}"
+        );
+        assert!(!text.contains("(no entries)"), "{text:?}");
+    }
+
+    #[test]
+    fn an_accepted_search_still_says_the_list_is_filtered() {
+        // A filtered list that looked unfiltered would be the worst outcome:
+        // the entry you wanted would look as though it does not exist.
+        let mut menu = MenuState::new(Frame::new(
+            "title",
+            vec![
+                MenuItem::command("build", "echo build"),
+                MenuItem::command("deploy", "echo deploy"),
+            ],
+        ));
+        menu.set_query("de".into());
+        let text = without_escapes(
+            &String::from_utf8(render(&mut menu, 40, 10, false, false).unwrap()).unwrap(),
+        );
+        assert!(text.contains("/de"), "{text:?}");
+        assert!(text.contains("Esc to clear"), "{text:?}");
     }
 
     /// Render a small menu and return the frame as text, escapes included.
@@ -916,7 +1235,7 @@ mod tests {
         ];
         let mut menu = MenuState::new(Frame::new("title", items));
         menu.move_down();
-        String::from_utf8(render(&mut menu, 40, 10, color).unwrap()).unwrap()
+        String::from_utf8(render(&mut menu, 40, 10, color, false).unwrap()).unwrap()
     }
 
     /// Drop the escape sequences, leaving what the user actually sees. A row is

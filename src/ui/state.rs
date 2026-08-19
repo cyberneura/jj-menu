@@ -12,17 +12,57 @@ pub struct Frame {
     /// Help text of the entry this frame was opened from.
     pub help: Option<String>,
     pub items: Vec<MenuItem>,
+    /// Index into [`Frame::visible`], not into [`Frame::items`].
+    ///
+    /// Everything the user moves through is what the filter left, so keeping
+    /// the cursor in that space is what stops it pointing at a hidden entry.
     pub cursor: usize,
+    /// The incremental search string. Empty means no filtering.
+    query: String,
+    /// Indices into `items` that match `query`, in the original order.
+    visible: Vec<usize>,
 }
 
 impl Frame {
     pub fn new(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
+        let visible = (0..items.len()).collect();
         Self {
             title: title.into(),
             help: None,
             items,
             cursor: 0,
+            query: String::new(),
+            visible,
         }
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// The entries the filter leaves, in the original order.
+    pub fn visible(&self) -> Vec<&MenuItem> {
+        self.visible.iter().map(|&i| &self.items[i]).collect()
+    }
+
+    /// Apply `query` and put the cursor on the first match.
+    ///
+    /// Matching is a case-insensitive substring of the label — the text on
+    /// screen. Searching the command as well would show entries with nothing
+    /// visible to explain why they matched.
+    fn set_query(&mut self, query: String) {
+        let needle = query.to_lowercase();
+        self.visible = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| needle.is_empty() || item.label().to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect();
+        self.query = query;
+        // Typing narrows the list under the cursor, so it has to come back to
+        // a row that still exists. The first match is where the eye is anyway.
+        self.cursor = 0;
     }
 }
 
@@ -52,8 +92,38 @@ impl MenuState {
             .expect("the root frame is never popped")
     }
 
-    pub fn items(&self) -> &[MenuItem] {
-        &self.frame().items
+    /// The entries currently on screen: what the incremental search left.
+    pub fn items(&self) -> Vec<&MenuItem> {
+        self.frame().visible()
+    }
+
+    /// The current search string; empty when the search is not in use.
+    pub fn query(&self) -> &str {
+        self.frame().query()
+    }
+
+    /// Replace the search string of this level.
+    pub fn set_query(&mut self, query: String) {
+        self.frame_mut().set_query(query);
+        // A shorter list needs the window pulled back up; the next draw calls
+        // scroll_into_view with the real height, and starting at the top is
+        // right for a cursor that just moved to the first match.
+        self.offset = 0;
+    }
+
+    /// Drop the search, keeping the cursor on the entry it is on.
+    ///
+    /// Leaving the cursor where it visually is (rather than resetting to the
+    /// top) is what makes Esc feel like "show me the rest again" instead of
+    /// "start over".
+    pub fn clear_query(&mut self) {
+        let selected = self.frame().visible.get(self.frame().cursor).copied();
+        let frame = self.frame_mut();
+        frame.set_query(String::new());
+        if let Some(index) = selected {
+            frame.cursor = index;
+        }
+        self.offset = 0;
     }
 
     pub fn cursor(&self) -> usize {
@@ -70,7 +140,11 @@ impl MenuState {
     }
 
     pub fn selected(&self) -> Option<&MenuItem> {
-        self.items().get(self.cursor())
+        let frame = self.frame();
+        frame
+            .visible
+            .get(frame.cursor)
+            .map(|&index| &frame.items[index])
     }
 
     pub fn is_empty(&self) -> bool {
@@ -133,12 +207,8 @@ impl MenuState {
         }
         items.extend(item.submenu.iter().cloned());
 
-        let frame = Frame {
-            title: item.label(),
-            help: item.help.clone(),
-            items,
-            cursor: 0,
-        };
+        let mut frame = Frame::new(item.label(), items);
+        frame.help = item.help.clone();
         self.frames.push(frame);
         self.offset = 0;
         true
@@ -344,5 +414,127 @@ mod tests {
         s.move_last();
         s.scroll_into_view(0);
         assert_eq!(s.offset(), 0);
+    }
+
+    fn named(labels: &[&str]) -> MenuState {
+        let items = labels
+            .iter()
+            .map(|label| MenuItem::command(*label, "echo hi"))
+            .collect();
+        MenuState::new(Frame::new("root", items))
+    }
+
+    fn labels(s: &MenuState) -> Vec<String> {
+        s.items().iter().map(|item| item.label()).collect()
+    }
+
+    #[test]
+    fn a_query_keeps_only_the_matching_entries_in_order() {
+        let mut s = named(&["build", "deploy", "deploy staging", "test"]);
+        s.set_query("deploy".into());
+        assert_eq!(labels(&s), ["deploy", "deploy staging"]);
+        assert_eq!(s.selected().map(|i| i.label()).as_deref(), Some("deploy"));
+    }
+
+    #[test]
+    fn a_query_matches_regardless_of_case() {
+        let mut s = named(&["Build", "DEPLOY"]);
+        s.set_query("depl".into());
+        assert_eq!(labels(&s), ["DEPLOY"]);
+    }
+
+    #[test]
+    fn the_cursor_goes_to_the_first_match() {
+        let mut s = named(&["build", "deploy", "test"]);
+        s.move_last();
+        assert_eq!(s.cursor(), 2);
+        s.set_query("deploy".into());
+        // Without this the cursor would still be at 2, which no longer exists.
+        assert_eq!(s.cursor(), 0);
+        assert_eq!(s.selected().map(|i| i.label()).as_deref(), Some("deploy"));
+    }
+
+    #[test]
+    fn moving_stays_inside_the_matches() {
+        let mut s = named(&["build", "deploy", "deploy staging", "test"]);
+        s.set_query("deploy".into());
+        s.move_down();
+        assert_eq!(
+            s.selected().map(|i| i.label()).as_deref(),
+            Some("deploy staging")
+        );
+        s.move_down();
+        assert_eq!(
+            s.selected().map(|i| i.label()).as_deref(),
+            Some("deploy staging"),
+            "must not walk past the last match into a filtered-out entry"
+        );
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_leaves_an_empty_list() {
+        let mut s = named(&["build", "deploy"]);
+        s.set_query("zzz".into());
+        assert!(s.is_empty());
+        assert!(s.selected().is_none());
+        // Enter on an empty result must not do anything, not pick entry 0.
+        s.move_down();
+        assert!(s.selected().is_none());
+    }
+
+    #[test]
+    fn clearing_the_query_keeps_the_entry_the_cursor_is_on() {
+        let mut s = named(&["build", "deploy", "test"]);
+        s.set_query("e".into());
+        // "build" has no e, so the matches are deploy and test
+        assert_eq!(labels(&s), ["deploy", "test"]);
+        s.move_down();
+        assert_eq!(s.selected().map(|i| i.label()).as_deref(), Some("test"));
+
+        s.clear_query();
+        assert_eq!(labels(&s), ["build", "deploy", "test"]);
+        assert_eq!(
+            s.selected().map(|i| i.label()).as_deref(),
+            Some("test"),
+            "clearing shows the rest again without moving off the entry"
+        );
+    }
+
+    #[test]
+    fn clearing_an_empty_query_leaves_the_cursor_alone() {
+        // Backspacing out of a search that was never typed into goes through
+        // here, and moving the selection on the way out would be a surprise.
+        let mut s = named(&["build", "deploy", "test"]);
+        s.move_last();
+        s.clear_query();
+        assert_eq!(s.selected().map(|i| i.label()).as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn a_submenu_starts_unfiltered_and_going_back_restores_the_filter() {
+        let parent = MenuItem {
+            title: Some("deploy".into()),
+            submenu: vec![
+                MenuItem::command("staging", "echo staging"),
+                MenuItem::command("production", "echo production"),
+            ],
+            ..Default::default()
+        };
+        let mut s = MenuState::new(Frame::new(
+            "root",
+            vec![MenuItem::command("build", "echo build"), parent],
+        ));
+
+        s.set_query("deploy".into());
+        assert_eq!(labels(&s), ["deploy"]);
+        assert!(s.enter_detail());
+
+        // The filter belongs to the level it was typed on.
+        assert_eq!(s.query(), "");
+        assert_eq!(labels(&s), ["staging", "production"]);
+
+        assert!(s.leave_detail());
+        assert_eq!(s.query(), "deploy");
+        assert_eq!(labels(&s), ["deploy"]);
     }
 }

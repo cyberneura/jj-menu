@@ -86,7 +86,7 @@ A bare list with no `menu:` key is also valid. The same structure works in TOML
 | `title` | Label. Defaults to `shell`. |
 | `shell` | Command, or a list of commands run as one script. |
 | `parallel` | Commands run at the same time, one shell each. |
-| `help` | Description shown in the detail view (`l` / `→`). |
+| `help` | Description shown next to the entry, and in the detail view (`l` / `→`). |
 | `submenu` | Nested entries. |
 | `args` | Values prompted for and substituted into `shell`. |
 

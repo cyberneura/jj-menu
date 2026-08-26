@@ -77,6 +77,13 @@ of any automated check.
 - **The search row is drawn in place of the blank line under the title**, so
   turning the search on does not take a row off the list. `CHROME_ROWS` counts
   that blank line; if the row ever moves, the height arithmetic moves with it.
+- **The selected entry's help is an overlay, not a row of its own.** It starts
+  on the selected row after the label and is drawn *over* the entries below
+  (`inline_help_runs`, `covered` in `ui::render`). Giving it rows would move
+  every entry under the cursor on each keystroke, which is the bug it was
+  written for (CYBERNEURA-DEV-582). The list height must not depend on it.
+  What does not fit is dropped; `detail_help` wraps the same text over as much
+  as half the screen in the detail view, which is where a long help is read.
 - **`Ctrl-C` leaves from everywhere, including the search.** It is the one key
   that always stops what is going on; routing it to "cancel the search" would
   make the search the single place where it does not.

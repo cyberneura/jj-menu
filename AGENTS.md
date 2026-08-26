@@ -82,8 +82,10 @@ of any automated check.
   (`inline_help_runs`, `covered` in `ui::render`). Giving it rows would move
   every entry under the cursor on each keystroke, which is the bug it was
   written for (CYBERNEURA-DEV-582). The list height must not depend on it.
-  What does not fit is dropped; `detail_help` wraps the same text over as much
-  as half the screen in the detail view, which is where a long help is read.
+  What does not fit is dropped. `detail_help` wraps the same text over as much
+  as half the screen in the detail view, which is where a long help is read —
+  and drops the rest in its turn, since neither view scrolls. Both caps are
+  documented in `README.md`; move one and the other has to say so.
 - **`Ctrl-C` leaves from everywhere, including the search.** It is the one key
   that always stops what is going on; routing it to "cancel the search" would
   make the search the single place where it does not.

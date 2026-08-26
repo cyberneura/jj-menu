@@ -106,8 +106,9 @@ entries never looks like a menu that does not have them.
 The `help` of the entry the cursor is on is shown next to it, carrying on over
 the entries below when it does not fit on the row. It is drawn *over* them, not
 between them: the list stays where it is as the cursor walks past entries that
-have help and entries that do not. Help too long for that is not lost: the
-detail view shows it wrapped, over as much as half the screen.
+have help and entries that do not. Help too long for that carries on in the
+detail view, which wraps it over as much as half the screen; a description
+longer than that is cut, in both places.
 
 Entries with a detail view are marked with `>`: those are the ones with a
 `submenu`, a `help` text, or both. The view shows the help, the entry's own

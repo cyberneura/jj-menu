@@ -1,6 +1,6 @@
 [package]
 name = "jj-menu"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A simple TUI menu launcher. Press `jj` and Enter to pick and run a command."

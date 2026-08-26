@@ -694,11 +694,13 @@ fn detail_help(help: Option<&str>, cols: u16, rows: u16) -> Vec<String> {
 /// Half the screen, the same share the status line may grow to: the view exists
 /// to show the help, so it gets the larger part of what it asks for, and a help
 /// longer than that is one no list would survive sharing a screen with. Never so
-/// many that the title, the blank line, one row of list and the status line have
-/// nowhere to go; always at least one, which is what the help had before it
-/// could wrap at all.
+/// many that the chrome, the blank row under the help itself, one row of list
+/// and the status line have nowhere to go — the status line is written at an
+/// absolute row, so a list pushed into it is not shortened but painted over.
+/// Always at least one row, which is what the help had before it could wrap at
+/// all.
 fn help_budget(rows: u16) -> u16 {
-    (rows / 2).min(rows.saturating_sub(CHROME_ROWS + 2)).max(1)
+    (rows / 2).min(rows.saturating_sub(CHROME_ROWS + 3)).max(1)
 }
 
 /// Help text as one run of words.
@@ -1610,11 +1612,37 @@ mod tests {
     fn the_help_rows_of_a_detail_view_never_take_the_whole_screen() {
         // Half the screen where there is room for it.
         assert_eq!(help_budget(24), 12);
-        // Six rows: title, help, blank, one entry and a status line have to fit,
-        // which is less than half of them.
-        assert_eq!(help_budget(6), 2);
+        // Eight rows: the title, the blank row under it, the help's own blank
+        // row, one entry and a status line have to fit around the help.
+        assert_eq!(help_budget(8), 3);
+        assert_eq!(help_budget(6), 1);
         assert_eq!(help_budget(4), 1, "always at least the row it always had");
         assert_eq!(help_budget(1), 1);
+    }
+
+    #[test]
+    fn a_long_help_leaves_the_detail_view_an_entry_the_status_line_does_not_take() {
+        // The status line is written at an absolute row: a list pushed into it
+        // is painted over rather than shortened, so the only entry of the view
+        // would silently disappear.
+        for rows in [6u16, 8, 10, 24] {
+            let mut item = MenuItem::command("deploy", "echo deploy");
+            item.help = Some("あ".repeat(400));
+            let mut menu = MenuState::new(Frame::new("title", vec![item]));
+            assert!(menu.enter_detail());
+
+            let text = without_escapes(
+                &String::from_utf8(render(&mut menu, 30, rows, false, false).unwrap()).unwrap(),
+            );
+            let entry = text
+                .lines()
+                .position(|line| line.contains("Run: deploy"))
+                .unwrap_or_else(|| panic!("the entry is drawn (rows={rows}): {text:?}"));
+            assert!(
+                entry < rows as usize - 1,
+                "the status line owns the last row (rows={rows}): {text:?}"
+            );
+        }
     }
 
     #[test]

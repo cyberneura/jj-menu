@@ -13,6 +13,10 @@ installers = ["shell"]
 # cyberneura/homebrew-tap updates itself hourly from the latest release, so a
 # token that can write to the tap does not have to be handed to this repository.
 publish-jobs = []
+# リリースの門番。ここに書いた job は plan の前段に入り、release.yml 全体が
+# これに依存する (タグ push は ci.yml とは別 run なので、ci.yml では塞げない)。
+# 実体は .github/workflows/test.yml。
+plan-jobs = ["./test"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # Unix-like only: a menu entry is a shell script run through `$SHELL -c`,
 # which has no meaningful equivalent on Windows (see src/exec.rs).

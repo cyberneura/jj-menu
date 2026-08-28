@@ -1,0 +1,34 @@
+# リリースの門番になるテスト。dist-workspace.toml の `plan-jobs` から呼ばれ、
+# cargo-dist が生成する release.yml の plan job がこれに `needs` で依存する。
+#
+# ci.yml とほぼ同じ内容を再利用ワークフローとして持っているのは、release.yml が
+# **タグ push で起動する別 run** で、ci.yml の結果を参照できないため。ci.yml が
+# 緑だったコミットにタグを打つとは限らない (タグだけ後から別コミットに打てる)。
+name: Test
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

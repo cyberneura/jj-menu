@@ -39,7 +39,22 @@ concurrency:
   queue: max
 
 jobs:
+  # タグが押されると release.yml がビルドして GitHub Release を出す。そこを
+  # release.yml 側だけで塞ぐことはできない: cargo-dist が生成する host job は
+  # `always()` で走り、ビルドが skipped でも受け入れる作りなので、テストが赤くて
+  # build-local-artifacts が skip されても **中身の無い Release が公開されてしまう**
+  # (draft は plan job が既に作っている)。
+  #
+  # したがって門番はタグを押す前に置く。ここが赤ければタグは存在せず、release.yml
+  # はそもそも起動しない。taskshoot-cli の同名ワークフローも同じ形にしてある。
+  #
+  # ci.yml と内容が重複するが、ci.yml は **別 run** なのでその結果はここから参照
+  # できない。タグは CI を通っていないコミットにも押せる以上、この重複は必要。
+  test:
+    uses: ./.github/workflows/test.yml
+
   tag:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

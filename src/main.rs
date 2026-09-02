@@ -123,21 +123,32 @@ fn run() -> Result<ExitCode> {
     let title = format!("jj-menu — {}", start_dir.display());
     match ui::run(items, &title)? {
         ui::Outcome::Cancelled => Ok(ExitCode::from(EXIT_CANCELLED)),
-        ui::Outcome::Run(Launch::Script(script)) => {
+        ui::Outcome::Run(Launch::Script(script), cwd) => {
+            let cwd = cwd.as_deref().unwrap_or(&start_dir);
             if args.print {
+                // The wrapper evaluates this in the calling shell, which is
+                // sitting in `start_dir`, so the directory has to travel with
+                // the command. It stays in effect afterwards -- that a `cd`
+                // reaches your own shell is what the wrapper is for, and an
+                // entry that would rather not move you says
+                // `run_in_current_directory`.
                 let mut out = stdout();
-                writeln!(out, "{script}")?;
+                writeln!(out, "{}", launchers::in_dir(cwd, &script, &start_dir))?;
                 out.flush()?;
                 return Ok(ExitCode::SUCCESS);
             }
 
-            echo("$", &script)?;
-            let status = exec::run(&script, &start_dir)?;
+            // Echoed with the `cd` the child is given as its working
+            // directory, so what is on screen is what is being run. An entry
+            // from an ancestor's file otherwise looks like it runs here.
+            echo("$", &launchers::in_dir(cwd, &script, &start_dir))?;
+            let status = exec::run(&script, cwd)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.
             Ok(ExitCode::from(exec::exit_code(status)))
         }
-        ui::Outcome::Run(Launch::Parallel(jobs)) => {
+        ui::Outcome::Run(Launch::Parallel(jobs), cwd) => {
+            let cwd = cwd.as_deref().unwrap_or(&start_dir);
             // Run here even under `--print`. There is nothing to hand back to
             // the calling shell: the point of `--print` is that `cd` and
             // `export` reach the user's shell, and a group is several separate
@@ -146,7 +157,7 @@ fn run() -> Result<ExitCode> {
             // whichever shell is calling — and fish, which the wrapper
             // supports, does not have it.
             for job in &jobs {
-                echo("&", &job.script)?;
+                echo("&", &launchers::in_dir(cwd, &job.script, &start_dir))?;
             }
             // With `--print` the wrapper is reading stdout through a command
             // substitution and evaluates whatever comes back; a job writing
@@ -156,7 +167,7 @@ fn run() -> Result<ExitCode> {
             } else {
                 parallel::Output::Inherit
             };
-            Ok(ExitCode::from(parallel::run(&jobs, &start_dir, output)?))
+            Ok(ExitCode::from(parallel::run(&jobs, cwd, output)?))
         }
     }
 }
@@ -185,8 +196,21 @@ fn report_config(config: &config::Config, start_dir: &std::path::Path) {
         );
     } else {
         println!("configuration files, in load order:");
-        for path in &config.sources {
-            println!("  {}", path.display());
+        for source in &config.sources {
+            // "by default", because this is the file's setting: an entry
+            // carrying `run_in_current_directory` of its own overrides it and
+            // does not show up here, which a bare "runs in ..." would deny.
+            match &source.cwd {
+                Some(dir) => println!(
+                    "  {} (entries run in {} by default)",
+                    source.path.display(),
+                    dir.display()
+                ),
+                None => println!(
+                    "  {} (entries run in the working directory by default)",
+                    source.path.display()
+                ),
+            }
         }
     }
     println!("menu entries from configuration: {}", config.menu.len());

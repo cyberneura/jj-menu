@@ -51,6 +51,27 @@ cargo run -- --show-config # which configuration files were loaded, then exits
 `cargo run` opens the interactive menu and waits for a key, so it is not part
 of any automated check.
 
+## Working on the configuration
+
+- **Where an entry runs is resolved while loading, not while running.**
+  `config::loader::assign_cwd` walks the parsed entries and writes
+  `MenuItem::cwd`: the directory of the file that declared them, or `None` for
+  "wherever `jj-menu` was started". Nothing downstream re-derives it, so an
+  entry that arrives from somewhere other than a file (the launchers,
+  `MenuItem::command`) is `None` and keeps running in `start_dir`.
+- **`run_in_current_directory` is `Option<bool>` on both the file and the
+  entry, and that matters.** `None` means "said nothing", which is what lets the
+  per-user file default the other way round (its entries belong to no project)
+  while a project file defaults to its own directory. Collapsing it to `bool`
+  loses that distinction.
+- **`--print` has to carry the directory itself.** The wrapper evaluates the
+  command in the user's shell, which is in `start_dir`, so `main` prefixes it
+  with `launchers::in_dir` — a `cd` valid in bash, zsh *and* fish. A subshell
+  would keep the shell from being moved but has no form all three accept, and
+  would drop the `cd` / `export` effects the wrapper exists for.
+- The same prefix goes on the `$` echo, so what is on screen is what the child
+  is actually given as its working directory.
+
 ## Working on the terminal code
 
 - **The menu is drawn on stderr**, so stdout stays free for `--print`. Keep it
@@ -103,6 +124,12 @@ pty, and agents often cannot open one (`openpty: Operation not permitted`).
 Rather than skipping verification, render a frame and assert on the bytes:
 `ui::render(menu, cols, rows, color)` returns the frame as a `Vec<u8>` without
 touching a terminal, and the tests in `src/ui/mod.rs` show the pattern.
+
+Where a pty *is* allowed, Python's `pty.fork` drives the real binary end to end
+without adding a dependency here: fork, write the keys, read what comes back.
+Point stdout at a pipe rather than the pty to read `--print` on its own. That is
+how the working-directory behaviour was checked by hand; it is not part of
+`cargo test`, since it does not run everywhere.
 
 When a test claims to guard behaviour, check that it actually fails when the
 behaviour is removed. Several assertions here look convincing while passing on

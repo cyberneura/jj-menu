@@ -29,13 +29,17 @@ fn tempdir(name: &str) -> PathBuf {
 fn show_config(dir: &Path) -> String {
     let empty_home = dir.join(".empty-home");
     fs::create_dir_all(&empty_home).expect("create the fake home");
+    show_config_with_home(dir, &empty_home)
+}
 
+/// The same, with the per-user configuration directory under `home`.
+fn show_config_with_home(dir: &Path, home: &Path) -> String {
     let output = Command::new(bin())
         .arg("--show-config")
         .arg("--cwd")
         .arg(dir)
-        .env("HOME", &empty_home)
-        .env("XDG_CONFIG_HOME", &empty_home)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
         .output()
         .expect("run jj-menu");
 
@@ -179,4 +183,119 @@ fn fails_with_a_message_naming_the_broken_file() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(".jj-menu.yaml"), "{stderr}");
     assert!(stderr.contains("titel"), "{stderr}");
+}
+
+/// The directory `--show-config` reports for the file whose path contains
+/// `needle`.
+fn runs_in(report: &str, needle: &str) -> String {
+    const PREFIX: &str = "(entries run in ";
+    const SUFFIX: &str = " by default)";
+
+    let line = report
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{needle} is not listed: {report}"));
+    let start = line
+        .find(PREFIX)
+        .unwrap_or_else(|| panic!("no run directory on {line:?}"));
+    line[start + PREFIX.len()..]
+        .strip_suffix(SUFFIX)
+        .unwrap_or_else(|| panic!("no run directory on {line:?}"))
+        .to_string()
+}
+
+/// `dir` as the binary reports it: it canonicalises what `--cwd` is given, and
+/// a temporary directory is behind a symlink on some platforms.
+fn resolved(dir: &Path) -> String {
+    fs::canonicalize(dir)
+        .expect("resolve the temporary directory")
+        .display()
+        .to_string()
+}
+
+#[test]
+fn reports_the_directory_each_file_runs_in() {
+    let root = tempdir("run-dir-reported");
+    let nested = root.join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(root.join(".jj-menu.yaml"), one_entry("from root")).unwrap();
+    fs::write(nested.join(".jj-menu.yaml"), one_entry("from nested")).unwrap();
+
+    let report = show_config(&nested);
+    assert_eq!(runs_in(&report, "a/b/.jj-menu.yaml"), resolved(&nested));
+    assert_eq!(
+        runs_in(&report, &format!("{}/.jj-menu.yaml", resolved(&root))),
+        resolved(&root),
+        "an ancestor's entries run at the ancestor, not here: {report}"
+    );
+}
+
+#[test]
+fn a_file_can_send_its_entries_back_to_the_working_directory() {
+    let root = tempdir("run-dir-opt-out");
+    let nested = root.join("a");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(
+        root.join(".jj-menu.yaml"),
+        format!("run_in_current_directory: true\n{}", one_entry("from root")),
+    )
+    .unwrap();
+
+    let report = show_config(&nested);
+    let line = report
+        .lines()
+        .find(|line| line.contains(".jj-menu.yaml"))
+        .unwrap_or_else(|| panic!("the file is not listed: {report}"));
+    assert!(
+        line.contains("(entries run in the working directory by default)"),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_per_user_file_runs_in_the_working_directory_by_default() {
+    // It belongs to no project, so running its entries in
+    // ~/.config/jj-menu would be useless for every one of them.
+    let root = tempdir("user-config-default");
+    let home = root.join("home");
+    let user_dir = home.join("jj-menu");
+    fs::create_dir_all(&user_dir).unwrap();
+    fs::write(
+        user_dir.join("config.yaml"),
+        one_entry("from the user file"),
+    )
+    .unwrap();
+
+    let report = show_config_with_home(&root, &home);
+    let line = report
+        .lines()
+        .find(|line| line.contains("jj-menu/config.yaml"))
+        .unwrap_or_else(|| panic!("the per-user file is not listed: {report}"));
+    assert!(
+        line.contains("(entries run in the working directory by default)"),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_per_user_file_can_still_ask_for_its_own_directory() {
+    let root = tempdir("user-config-opts-in");
+    let home = root.join("home");
+    let user_dir = home.join("jj-menu");
+    fs::create_dir_all(&user_dir).unwrap();
+    fs::write(
+        user_dir.join("config.yaml"),
+        format!(
+            "run_in_current_directory: false\n{}",
+            one_entry("from the user file")
+        ),
+    )
+    .unwrap();
+
+    let report = show_config_with_home(&root, &home);
+    assert_eq!(
+        runs_in(&report, "jj-menu/config.yaml"),
+        resolved(&user_dir),
+        "{report}"
+    );
 }

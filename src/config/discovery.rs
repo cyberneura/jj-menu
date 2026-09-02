@@ -70,11 +70,39 @@ pub fn user_config_path() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Where a configuration file was found.
+///
+/// The loader needs the difference: a project file sits in the tree its
+/// entries are about, while the per-user file belongs to no project at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The starting directory or one of its ancestors.
+    Project,
+    /// The per-user configuration directory.
+    User,
+}
+
+/// A configuration file to load, and where it was found.
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub path: PathBuf,
+    pub scope: Scope,
+}
+
 /// All configuration files to load, in order.
-pub fn all_config_paths(start_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = project_config_paths(start_dir);
-    paths.extend(user_config_path());
-    paths
+pub fn all_config_paths(start_dir: &Path) -> Vec<Found> {
+    let mut found: Vec<Found> = project_config_paths(start_dir)
+        .into_iter()
+        .map(|path| Found {
+            path,
+            scope: Scope::Project,
+        })
+        .collect();
+    found.extend(user_config_path().map(|path| Found {
+        path,
+        scope: Scope::User,
+    }));
+    found
 }
 
 #[cfg(test)]

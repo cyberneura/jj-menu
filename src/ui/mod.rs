@@ -10,6 +10,7 @@ pub mod theme;
 
 use std::collections::HashMap;
 use std::io::{Write, stderr};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -24,8 +25,11 @@ use theme::{Style, paint_with};
 
 /// What the user picked.
 pub enum Outcome {
-    /// Run this, with any arguments already filled in.
-    Run(Launch),
+    /// Run this, with any arguments already filled in, in the given directory.
+    ///
+    /// `None` for the directory means the one `jj-menu` was started from; the
+    /// menu does not know it, so the caller substitutes it.
+    Run(Launch, Option<PathBuf>),
     /// Leave without running anything.
     Cancelled,
 }
@@ -196,7 +200,7 @@ fn select(menu: &mut MenuState) -> Result<Option<Outcome>> {
         return Ok(None);
     }
     // Argument input was cancelled: stay in the menu.
-    Ok(resolve(&item)?.map(Outcome::Run))
+    Ok(resolve(&item)?.map(|launch| Outcome::Run(launch, item.cwd.clone())))
 }
 
 /// Fill in the arguments of `item` and return what to run.

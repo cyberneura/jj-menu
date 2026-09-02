@@ -234,6 +234,7 @@ shell = "pnpm dev"
 | `help` | Description shown next to the entry, and in the detail view. |
 | `submenu` | Nested entries, opened with `l` / `→`. |
 | `args` | Values prompted for and substituted into `shell`. |
+| `run_in_current_directory` | Run this entry where `jj` was typed instead of where the file lives. |
 
 Each `args` entry has a `name` (the `{name}` placeholder in `shell`), and
 optionally a `prompt` and a `default`.
@@ -246,6 +247,56 @@ argument. The quotes do not make it literal: `$(...)`, backticks and `$VAR` stil
 expand inside them, and a `"` in the input ends the quoted section. An entry is
 as trusted as whoever types into its prompt. A placeholder with no matching
 argument is left alone, so `${HOME}` and `a{1,2}` survive unharmed.
+
+### Where a command runs
+
+**An entry runs in the directory of the configuration file that declared it**,
+not in the directory you happened to type `jj` in. A file at the root of a
+repository can therefore say
+
+```yaml
+menu:
+  - title: Run the tests
+    shell: pytest
+```
+
+and that entry works from anywhere in the checkout, without a `cd` in front of
+it and without knowing how deep you are.
+
+The per-user file is the exception. It belongs to no project, its entries are
+written to be run wherever you are, and running them in
+`~/.config/jj-menu/` would be useless — so its entries default to the working
+directory instead.
+
+`run_in_current_directory: true` asks for the working directory explicitly. It
+can be set on the file, where it covers every entry in it, and on an entry,
+where it covers that entry and its `submenu`. The nearest one wins, so an entry
+can also opt back *in* with `run_in_current_directory: false`:
+
+```yaml
+run_in_current_directory: true    # everything in this file runs where you are
+menu:
+  - title: Count the files here
+    shell: ls | wc -l
+
+  - title: Run the tests
+    shell: pytest
+    run_in_current_directory: false   # ... except this one
+```
+
+`jj-menu --show-config` reports the directory each file's entries run in by
+default; an entry that overrides it is not listed separately.
+
+Two things follow from this:
+
+- **Under the shell wrapper the command is prefixed with `cd <dir>;`**, since
+  the wrapper evaluates it in your shell rather than in a child process. That
+  `cd` stays in effect afterwards — a directory change reaching your own shell
+  is what the wrapper is for. An entry that should leave you where you are
+  needs `run_in_current_directory: true`.
+- Entries from the automatic launchers are unaffected: they are found relative
+  to the working directory and already carry their own `cd` when the project
+  they belong to is in an ancestor.
 
 ### Running commands at once
 

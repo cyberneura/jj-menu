@@ -89,6 +89,39 @@ A bare list with no `menu:` key is also valid. The same structure works in TOML
 | `help` | Description shown next to the entry, and in the detail view (`l` / `→`). |
 | `submenu` | Nested entries. |
 | `args` | Values prompted for and substituted into `shell`. |
+| `run_in_current_directory` | Run where `jj` was typed instead of where the file lives. |
+
+### Where a command runs
+
+**An entry runs in the directory of the file that declared it**, not in the
+directory the user typed `jj` in. So a repository-root file writes
+
+```yaml
+menu:
+  - title: Run the tests
+    shell: pytest
+```
+
+and it works from anywhere in the checkout — **do not add a `cd` to the front
+of an entry to reach the project it belongs to**, and do not write paths
+relative to where the user might be standing. Paths relative to the file's own
+directory are the right thing.
+
+The per-user file is the exception: it belongs to no project, so its entries
+default to the working directory instead.
+
+`run_in_current_directory: true` asks for the working directory explicitly, and
+`false` asks for the file's directory. It goes on the file (covering every entry
+in it) or on an entry (covering that entry and its `submenu`); the nearest one
+wins. Use `true` for an entry that is *about* wherever the user is — `ls`,
+`git status` in a file that sits above several repositories.
+
+Under the shell wrapper such an entry is evaluated in the user's shell with a
+`cd` in front, which stays in effect afterwards. An entry that must not move the
+user's shell needs `run_in_current_directory: true`.
+
+`jj-menu --show-config` reports the directory each file's entries run in by
+default. A per-entry override is not shown there — read the file for those.
 
 ### parallel
 

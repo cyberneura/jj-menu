@@ -51,6 +51,47 @@ cargo run -- --show-config # which configuration files were loaded, then exits
 `cargo run` opens the interactive menu and waits for a key, so it is not part
 of any automated check.
 
+## Working on the configuration
+
+- **Where an entry runs is resolved while loading, not while running.**
+  `config::loader::assign_cwd` walks the parsed entries and writes
+  `MenuItem::cwd`: the directory of the file that declared them, or `None` for
+  "wherever `jj-menu` was started". Nothing downstream re-derives it, so an
+  entry that arrives from somewhere other than a file (the launchers,
+  `MenuItem::command`) is `None` and keeps running in `start_dir`.
+- **`run_in_current_directory` is `Option<bool>` on both the file and the
+  entry, and that matters.** `None` means "said nothing", which is what lets the
+  per-user file default the other way round (its entries belong to no project)
+  while a project file defaults to its own directory. Collapsing it to `bool`
+  loses that distinction.
+- **`--print` has to carry the directory itself.** The wrapper evaluates the
+  command in the user's shell, so `main::in_dir_script` prefixes it.
+  `cd <dir>;` and not `cd <dir> &&`: `&&` binds tighter than `&`, so an entry
+  starting `server &` would background the `cd` with it and leave the rest of
+  the script where the shell already was. A subshell would keep the shell from
+  being moved, but has no form bash, zsh *and* fish all accept, and would drop
+  the `cd` / `export` effects the wrapper exists for. `launchers::in_dir` is
+  the single-command version and keeps its `&&`.
+- **`start_dir` is not where the calling shell is standing.** `--cwd` moves the
+  first and not the second, so `main` keeps `invoked_from` separately, and that
+  is what decides whether a printed command needs a `cd` at all. Comparing
+  against `start_dir` makes `jj --cwd /project` from /tmp print a bare command
+  that the shell then runs in /tmp. `invoked_from` is an `Option`, because a
+  process outlives its working directory being deleted and `--cwd` is what you
+  reach for then; unknown means printing the `cd` rather than leaving it out.
+- **A printed `cd` is checked before it is printed, not by the shell.** For the
+  same reason there is no portable grouping there is no portable "cd, or stop",
+  so a `cd` that fails in the caller's shell would run the script wherever that
+  shell already was. `in_dir_script` returns an error instead, which is what
+  `Command::current_dir` does for `exec::run`. The check is
+  `metadata(dir.join("."))` and not `is_dir()`: entering a directory needs the
+  search bit *on* it, which only resolving a component inside it asks for. It
+  also refuses a name that is not UTF-8, since the command is text and the path
+  is bytes. `echo_script` is the cosmetic version and falls back to the bare
+  script — the direct path hands the bytes to `Command::current_dir` and works.
+- The same prefix goes on the `$` echo, so what is on screen is what the child
+  is actually given as its working directory.
+
 ## Working on the terminal code
 
 - **The menu is drawn on stderr**, so stdout stays free for `--print`. Keep it
@@ -103,6 +144,12 @@ pty, and agents often cannot open one (`openpty: Operation not permitted`).
 Rather than skipping verification, render a frame and assert on the bytes:
 `ui::render(menu, cols, rows, color)` returns the frame as a `Vec<u8>` without
 touching a terminal, and the tests in `src/ui/mod.rs` show the pattern.
+
+Where a pty *is* allowed, Python's `pty.fork` drives the real binary end to end
+without adding a dependency here: fork, write the keys, read what comes back.
+Point stdout at a pipe rather than the pty to read `--print` on its own. That is
+how the working-directory behaviour was checked by hand; it is not part of
+`cargo test`, since it does not run everywhere.
 
 When a test claims to guard behaviour, check that it actually fails when the
 behaviour is removed. Several assertions here look convincing while passing on

@@ -3,6 +3,8 @@
 //! The same model is produced from YAML, TOML and JSON, so parsing lives in
 //! [`super::loader`] and only the shape is described here.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 /// A whole configuration file.
@@ -12,6 +14,15 @@ pub struct ConfigFile {
     /// Menu entries defined by this file.
     #[serde(default)]
     pub menu: Vec<MenuItem>,
+
+    /// When `true`, the entries of this file run in the directory `jj-menu`
+    /// was started from instead of the directory holding the file.
+    ///
+    /// `None` means the file said nothing, which is not the same as `false`:
+    /// the per-user file has no project to belong to, so it defaults the
+    /// other way round (see [`super::loader::load`]).
+    #[serde(default)]
+    pub run_in_current_directory: Option<bool>,
 
     /// When `false`, this file is skipped if another configuration file has
     /// already been loaded. Defaults to `true` (files are merged).
@@ -62,6 +73,19 @@ pub struct MenuItem {
     /// Placeholders that are prompted for before running `shell`.
     #[serde(default)]
     pub args: Vec<ArgSpec>,
+
+    /// Overrides the file's `run_in_current_directory` for this entry, and for
+    /// its `submenu` unless a nested entry overrides it in turn.
+    #[serde(default)]
+    pub run_in_current_directory: Option<bool>,
+
+    /// Directory this entry runs in, filled in while loading; `None` means the
+    /// directory `jj-menu` was started from.
+    ///
+    /// Not a configuration key — `deny_unknown_fields` rejects a file that
+    /// tries to set it, which is why it is skipped rather than defaulted.
+    #[serde(skip)]
+    pub cwd: Option<PathBuf>,
 }
 
 /// One command of a `parallel` group.

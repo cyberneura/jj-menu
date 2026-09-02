@@ -83,6 +83,9 @@ pub fn find_up(start_dir: &Path, names: &[&str]) -> Option<PathBuf> {
 /// Prefix a command with `cd` when the project lives outside the working
 /// directory, so entries found in an ancestor still run in the right place.
 ///
+/// For a launcher's own command, which is a single one. A configured entry can
+/// be a whole script and needs `crate::in_dir_script` instead.
+///
 /// The path is quoted with single quotes; an embedded single quote is escaped
 /// the POSIX way (`'\''`).
 pub fn in_dir(dir: &Path, command: &str, start_dir: &Path) -> String {

@@ -26,13 +26,23 @@ fn validate(items: &[MenuItem], path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One configuration file that was merged in.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub path: PathBuf,
+    /// Where the entries of this file run unless one of them says otherwise;
+    /// `None` is the directory `jj-menu` was started from.
+    pub cwd: Option<PathBuf>,
+}
+
 /// The merged configuration used to build the menu.
 #[derive(Debug, Default)]
 pub struct Config {
     pub menu: Vec<MenuItem>,
     pub auto_launchers: AutoLaunchers,
-    /// Files that were actually merged, in load order. Reported by `--debug`.
-    pub sources: Vec<PathBuf>,
+    /// Files that were actually merged, in load order. Reported by
+    /// `--show-config`.
+    pub sources: Vec<Source>,
 }
 
 /// Whether a file declares `merge: false`, read on its own.
@@ -127,6 +137,20 @@ fn parse_json(text: &str) -> Result<ConfigFile> {
     }
 }
 
+/// Record the directory each entry runs in.
+///
+/// `here` is what the file, or the enclosing entry, decided. An entry that
+/// states `run_in_current_directory` itself overrides that for its own command
+/// and for its submenu, which is what makes the setting readable at any depth:
+/// it always describes the entry it is written on and everything under it.
+fn assign_cwd(items: &mut [MenuItem], config_dir: &Path, here: bool) {
+    for item in items {
+        let here = item.run_in_current_directory.unwrap_or(here);
+        item.cwd = (!here).then(|| config_dir.to_path_buf());
+        assign_cwd(&mut item.submenu, config_dir, here);
+    }
+}
+
 /// Load and merge every configuration file that applies to `start_dir`.
 ///
 /// A file whose `merge` is `false` is skipped once anything has been loaded.
@@ -136,7 +160,8 @@ pub fn load(start_dir: &Path) -> Result<Config> {
     let mut config = Config::default();
     let mut auto_launchers: Option<AutoLaunchers> = None;
 
-    for path in discovery::all_config_paths(start_dir) {
+    for found in discovery::all_config_paths(start_dir) {
+        let path = found.path;
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -148,7 +173,7 @@ pub fn load(start_dir: &Path) -> Result<Config> {
             continue;
         }
 
-        let file =
+        let mut file =
             parse(&path, &text).with_context(|| format!("failed to parse {}", path.display()))?;
 
         // The early check above already skipped this case, but keep the
@@ -167,8 +192,21 @@ pub fn load(start_dir: &Path) -> Result<Config> {
             auto_launchers = file.auto_launchers;
         }
 
+        // Entries run where they were written, so a command does not have to
+        // start with a `cd` to find the project it is about. The per-user file
+        // is the exception: it belongs to no project, and its entries are
+        // written to be run wherever you happen to be.
+        let config_dir = path.parent().unwrap_or(start_dir);
+        let here = file
+            .run_in_current_directory
+            .unwrap_or(found.scope == discovery::Scope::User);
+        assign_cwd(&mut file.menu, config_dir, here);
+
         config.menu.extend(file.menu);
-        config.sources.push(path);
+        config.sources.push(Source {
+            cwd: (!here).then(|| config_dir.to_path_buf()),
+            path,
+        });
     }
 
     config.auto_launchers = auto_launchers.unwrap_or_default();
@@ -181,6 +219,36 @@ mod tests {
 
     fn parse_str(name: &str, text: &str) -> Result<ConfigFile> {
         parse(Path::new(name), text)
+    }
+
+    fn tempdir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jj-menu-loader-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Canonical, because that is what `load` is given in `main` and what
+        // the entries are compared against below.
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    /// The entry titled `title`, looked up by label.
+    ///
+    /// By title rather than by index: `load` also reads the per-user file, so
+    /// the developer running the tests may well contribute entries of their
+    /// own, and those must not decide what position anything is at.
+    fn entry<'a>(config: &'a Config, title: &str) -> &'a MenuItem {
+        config
+            .menu
+            .iter()
+            .find(|item| item.label() == title)
+            .unwrap_or_else(|| panic!("no entry titled {title:?}"))
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    fn one_entry(title: &str) -> String {
+        format!("menu:\n  - title: {title}\n    shell: 'true'\n")
     }
 
     #[test]
@@ -391,5 +459,99 @@ mod tests {
     fn rejects_unknown_keys_so_typos_are_not_silently_ignored() {
         assert!(parse_str("a.yaml", "menuu: []").is_err());
         assert!(parse_str("a.yaml", "menu:\n  - titel: t\n").is_err());
+    }
+
+    #[test]
+    fn an_entry_runs_where_the_file_that_declared_it_lives() {
+        // The point of the default: a command written in the project's file
+        // does not have to start with a `cd` to find the project.
+        let root = tempdir("declaring-dir");
+        let nested = root.join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        write(&root, ".jj-menu.yaml", &one_entry("from root"));
+        write(&nested, ".jj-menu.yaml", &one_entry("from nested"));
+
+        let config = load(&nested).unwrap();
+        assert_eq!(entry(&config, "from nested").cwd.as_deref(), Some(&*nested));
+        assert_eq!(entry(&config, "from root").cwd.as_deref(), Some(&*root));
+    }
+
+    #[test]
+    fn a_file_can_ask_for_the_working_directory_instead() {
+        let dir = tempdir("file-opts-out");
+        let nested = dir.join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+        write(
+            &dir,
+            ".jj-menu.yaml",
+            &format!("run_in_current_directory: true\n{}", one_entry("here")),
+        );
+
+        let config = load(&nested).unwrap();
+        assert_eq!(
+            entry(&config, "here").cwd,
+            None,
+            "None is what stands for the directory jj-menu was started from"
+        );
+        assert_eq!(config.sources[0].cwd, None, "and --show-config says so");
+    }
+
+    #[test]
+    fn an_entry_overrides_the_file_in_both_directions() {
+        let dir = tempdir("entry-overrides");
+        write(
+            &dir,
+            ".jj-menu.yaml",
+            "run_in_current_directory: true\n\
+             menu:\n\
+             \x20 - title: follows the file\n\
+             \x20   shell: 'true'\n\
+             \x20 - title: back to the file's directory\n\
+             \x20   shell: 'true'\n\
+             \x20   run_in_current_directory: false\n",
+        );
+
+        let config = load(&dir).unwrap();
+        assert_eq!(entry(&config, "follows the file").cwd, None);
+        assert_eq!(
+            entry(&config, "back to the file's directory")
+                .cwd
+                .as_deref(),
+            Some(&*dir)
+        );
+    }
+
+    #[test]
+    fn a_submenu_inherits_its_entry_and_can_override_it_in_turn() {
+        let dir = tempdir("submenu-inherits");
+        write(
+            &dir,
+            ".jj-menu.yaml",
+            "menu:\n\
+             \x20 - title: group\n\
+             \x20   run_in_current_directory: true\n\
+             \x20   submenu:\n\
+             \x20     - title: inherited\n\
+             \x20       shell: 'true'\n\
+             \x20     - title: overridden\n\
+             \x20       shell: 'true'\n\
+             \x20       run_in_current_directory: false\n",
+        );
+
+        let config = load(&dir).unwrap();
+        let group = entry(&config, "group");
+        assert_eq!(group.submenu[0].cwd, None, "inherited from the entry");
+        assert_eq!(
+            group.submenu[1].cwd.as_deref(),
+            Some(&*dir),
+            "a nested entry has the last word"
+        );
+    }
+
+    #[test]
+    fn cwd_is_not_something_a_file_can_set() {
+        // It is filled in while loading. A file naming it is a typo, not a
+        // way to point an entry at an arbitrary directory.
+        assert!(parse_str("a.yaml", "menu:\n  - shell: 'true'\n    cwd: /tmp\n").is_err());
     }
 }

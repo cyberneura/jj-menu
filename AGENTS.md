@@ -81,7 +81,12 @@ of any automated check.
   same reason there is no portable grouping there is no portable "cd, or stop",
   so a `cd` that fails in the caller's shell would run the script wherever that
   shell already was. `in_dir_script` returns an error instead, which is what
-  `Command::current_dir` does for `exec::run`.
+  `Command::current_dir` does for `exec::run`. The check is
+  `metadata(dir.join("."))` and not `is_dir()`: entering a directory needs the
+  search bit *on* it, which only resolving a component inside it asks for. It
+  also refuses a name that is not UTF-8, since the command is text and the path
+  is bytes. `echo_script` is the cosmetic version and falls back to the bare
+  script — the direct path hands the bytes to `Command::current_dir` and works.
 - The same prefix goes on the `$` echo, so what is on screen is what the child
   is actually given as its working directory.
 

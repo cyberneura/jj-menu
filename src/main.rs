@@ -207,11 +207,21 @@ fn in_dir_script(
     if dir == invoked_from {
         return Ok(script.to_string());
     }
-    if !dir.is_dir() {
-        anyhow::bail!(
-            "{} is no longer a directory, so the entry has nowhere to run",
+    // `dir.join(".")` and not `dir`: entering a directory needs search
+    // permission *on* it, and resolving a component inside it is what asks for
+    // that. Plain `is_dir` reads the entry out of the parent instead, so it
+    // still says yes for a directory whose `+x` has been taken away -- which
+    // `cd` would then refuse, leaving the script to run where the shell was.
+    match std::fs::metadata(dir.join(".")) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => anyhow::bail!(
+            "{} is not a directory, so the entry has nowhere to run",
             dir.display()
-        );
+        ),
+        Err(err) => anyhow::bail!(
+            "{} cannot be entered ({err}), so the entry has nowhere to run",
+            dir.display()
+        ),
     }
     // A shell command is text, and a path on Unix is bytes. `to_string_lossy`
     // would hand the shell a `cd` into a path with U+FFFD where the original
@@ -333,6 +343,7 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn the_help_text_shows_a_usable_example() {
@@ -412,7 +423,28 @@ mod tests {
         let err = in_dir_script(&gone, "rm -rf build", std::path::Path::new("/tmp"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no longer a directory"), "{err}");
+        assert!(err.contains("nowhere to run"), "{err}");
+        assert!(err.contains(&gone.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn refuses_to_print_a_cd_into_a_directory_it_cannot_enter() {
+        // A directory that still exists but has lost its search bit: `cd`
+        // would refuse it, and the `;` would then run the script wherever the
+        // caller's shell already was.
+        let dir = existing_dir("unsearchable");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores the mode, and then there is nothing to observe.
+        let enforced = std::fs::metadata(dir.join(".")).is_err();
+        let result = in_dir_script(&dir, "rm -rf build", std::path::Path::new("/tmp"));
+        // Restored before asserting, so a failure cannot leave it behind
+        // unreadable for the next run.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if enforced {
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("cannot be entered"), "{err}");
+        }
     }
 
     #[test]

@@ -76,7 +76,9 @@ of any automated check.
   first and not the second, so `main` keeps `invoked_from` separately, and that
   is what decides whether a printed command needs a `cd` at all. Comparing
   against `start_dir` makes `jj --cwd /project` from /tmp print a bare command
-  that the shell then runs in /tmp.
+  that the shell then runs in /tmp. `invoked_from` is an `Option`, because a
+  process outlives its working directory being deleted and `--cwd` is what you
+  reach for then; unknown means printing the `cd` rather than leaving it out.
 - **A printed `cd` is checked before it is printed, not by the shell.** For the
   same reason there is no portable grouping there is no portable "cd, or stop",
   so a `cd` that fails in the caller's shell would run the script wherever that

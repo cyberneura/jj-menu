@@ -90,11 +90,18 @@ fn run() -> Result<ExitCode> {
     // flag only says where to start looking for configuration files. The two
     // are the same almost always, and telling them apart is what keeps
     // `jj --cwd /project` from /tmp printing a command that then runs in /tmp.
-    let invoked_from = std::env::current_dir().context("failed to read the working directory")?;
-    let invoked_from = std::fs::canonicalize(&invoked_from)
-        .with_context(|| format!("failed to resolve {}", invoked_from.display()))?;
+    //
+    // An option, because a process outlives its working directory being
+    // deleted and that is exactly when `--cwd` earns its keep. Only the
+    // printed `cd` wants this, and not knowing where the shell is means
+    // printing one rather than leaving it out.
+    let invoked_from = std::env::current_dir()
+        .ok()
+        .and_then(|dir| std::fs::canonicalize(dir).ok());
 
-    let start_dir = args.cwd.clone().unwrap_or_else(|| invoked_from.clone());
+    let Some(start_dir) = args.cwd.clone().or_else(|| invoked_from.clone()) else {
+        anyhow::bail!("failed to read the working directory; pass --cwd to say where to look");
+    };
     // Absolute from here on. The launchers build `cd <dir> && ...` commands
     // for projects found in an ancestor, and those run with the working
     // directory already set to `start_dir` — a relative path would then be
@@ -132,7 +139,11 @@ fn run() -> Result<ExitCode> {
             let cwd = cwd.as_deref().unwrap_or(&start_dir);
             if args.print {
                 let mut out = stdout();
-                writeln!(out, "{}", in_dir_script(cwd, &script, &invoked_from)?)?;
+                writeln!(
+                    out,
+                    "{}",
+                    in_dir_script(cwd, &script, invoked_from.as_deref())?
+                )?;
                 out.flush()?;
                 return Ok(ExitCode::SUCCESS);
             }
@@ -140,7 +151,7 @@ fn run() -> Result<ExitCode> {
             // Echoed with the `cd` the child is given as its working
             // directory, so what is on screen is what is being run. An entry
             // from an ancestor's file otherwise looks like it runs here.
-            echo("$", &echo_script(cwd, &script, &invoked_from))?;
+            echo("$", &echo_script(cwd, &script, invoked_from.as_deref()))?;
             let status = exec::run(&script, cwd)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.
@@ -156,7 +167,7 @@ fn run() -> Result<ExitCode> {
             // whichever shell is calling — and fish, which the wrapper
             // supports, does not have it.
             for job in &jobs {
-                echo("&", &echo_script(cwd, &job.script, &invoked_from))?;
+                echo("&", &echo_script(cwd, &job.script, invoked_from.as_deref()))?;
             }
             // With `--print` the wrapper is reading stdout through a command
             // substitution and evaluates whatever comes back; a job writing
@@ -199,12 +210,18 @@ fn run() -> Result<ExitCode> {
 /// path, where `Command::current_dir` never starts the child at all. It leaves
 /// the moment between this check and the shell's `cd` uncovered, which is as
 /// close as a printed command can get.
+///
+/// `invoked_from` is `None` when the calling shell's directory could not be
+/// read, which is a deleted working directory. The `cd` is then printed
+/// unconditionally: it is only ever left out as a shortcut for "you are
+/// already there", and guessing that from nothing would be the wrong way to be
+/// wrong.
 fn in_dir_script(
     dir: &std::path::Path,
     script: &str,
-    invoked_from: &std::path::Path,
+    invoked_from: Option<&std::path::Path>,
 ) -> Result<String> {
-    if dir == invoked_from {
+    if invoked_from == Some(dir) {
         return Ok(script.to_string());
     }
     // `dir.join(".")` and not `dir`: entering a directory needs search
@@ -242,7 +259,11 @@ fn in_dir_script(
 /// the bare script rather than stopping the entry: on this path the child is
 /// given the directory through `Command::current_dir`, which takes the bytes
 /// as they are and reports its own error if they have gone stale.
-fn echo_script(dir: &std::path::Path, script: &str, invoked_from: &std::path::Path) -> String {
+fn echo_script(
+    dir: &std::path::Path,
+    script: &str,
+    invoked_from: Option<&std::path::Path>,
+) -> String {
     in_dir_script(dir, script, invoked_from).unwrap_or_else(|_| script.to_string())
 }
 
@@ -384,7 +405,7 @@ mod tests {
     fn a_script_is_printed_unchanged_when_it_already_runs_here() {
         let here = existing_dir("unchanged");
         assert_eq!(
-            in_dir_script(&here, "make build", &here).unwrap(),
+            in_dir_script(&here, "make build", Some(&here)).unwrap(),
             "make build"
         );
     }
@@ -393,7 +414,7 @@ mod tests {
     fn a_script_from_another_directory_is_printed_with_a_cd() {
         let dir = existing_dir("quoted-'-name");
         assert_eq!(
-            in_dir_script(&dir, "make build", &dir.join("sub")).unwrap(),
+            in_dir_script(&dir, "make build", Some(&dir.join("sub"))).unwrap(),
             format!(
                 "cd {}; make build",
                 launchers::quote(&dir.to_string_lossy())
@@ -408,7 +429,7 @@ mod tests {
         // with the server and leaving the next line where the shell already
         // was. Every command of the script has to end up in the directory.
         let dir = existing_dir("whole-script");
-        let printed = in_dir_script(&dir, "server &\nnext", &dir.join("sub")).unwrap();
+        let printed = in_dir_script(&dir, "server &\nnext", Some(&dir.join("sub"))).unwrap();
         assert!(printed.ends_with("; server &\nnext"), "{printed}");
         assert!(!printed.contains("&&"), "{printed}");
     }
@@ -420,11 +441,22 @@ mod tests {
         // would run the script in whatever directory the shell was already in.
         let gone = std::env::temp_dir().join("jj-menu-main-no-such-directory");
         let _ = std::fs::remove_dir_all(&gone);
-        let err = in_dir_script(&gone, "rm -rf build", std::path::Path::new("/tmp"))
+        let err = in_dir_script(&gone, "rm -rf build", Some(std::path::Path::new("/tmp")))
             .unwrap_err()
             .to_string();
         assert!(err.contains("nowhere to run"), "{err}");
         assert!(err.contains(&gone.display().to_string()), "{err}");
+    }
+
+    #[test]
+    fn prints_the_cd_when_the_callers_directory_is_unknown() {
+        // A deleted working directory, which is where `--cwd` earns its keep.
+        // Leaving the `cd` out is only ever the shortcut for "you are already
+        // there", and there is nothing here saying so.
+        let dir = existing_dir("unknown-caller");
+        let printed = in_dir_script(&dir, "make build", None).unwrap();
+        assert!(printed.starts_with("cd "), "{printed}");
+        assert!(printed.ends_with("; make build"), "{printed}");
     }
 
     #[test]
@@ -436,7 +468,7 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
         // Root ignores the mode, and then there is nothing to observe.
         let enforced = std::fs::metadata(dir.join(".")).is_err();
-        let result = in_dir_script(&dir, "rm -rf build", std::path::Path::new("/tmp"));
+        let result = in_dir_script(&dir, "rm -rf build", Some(std::path::Path::new("/tmp")));
         // Restored before asserting, so a failure cannot leave it behind
         // unreadable for the next run.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -453,7 +485,7 @@ mod tests {
         // and the `;` would then run the script where the shell already was.
         let dir = existing_dir("utf8").join(OsStr::from_bytes(b"broken-\xff-name"));
         std::fs::create_dir_all(&dir).unwrap();
-        let err = in_dir_script(&dir, "rm -rf build", std::path::Path::new("/tmp"))
+        let err = in_dir_script(&dir, "rm -rf build", Some(std::path::Path::new("/tmp")))
             .unwrap_err()
             .to_string();
         assert!(err.contains("not valid UTF-8"), "{err}");
@@ -466,7 +498,7 @@ mod tests {
         let dir = existing_dir("utf8").join(OsStr::from_bytes(b"broken-\xff-name"));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(
-            echo_script(&dir, "make build", std::path::Path::new("/tmp")),
+            echo_script(&dir, "make build", Some(std::path::Path::new("/tmp"))),
             "make build"
         );
     }

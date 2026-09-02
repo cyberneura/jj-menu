@@ -86,10 +86,15 @@ fn run() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let start_dir = match args.cwd {
-        Some(dir) => dir,
-        None => std::env::current_dir().context("failed to read the working directory")?,
-    };
+    // Where the calling shell is standing, which `--cwd` does not move: that
+    // flag only says where to start looking for configuration files. The two
+    // are the same almost always, and telling them apart is what keeps
+    // `jj --cwd /project` from /tmp printing a command that then runs in /tmp.
+    let invoked_from = std::env::current_dir().context("failed to read the working directory")?;
+    let invoked_from = std::fs::canonicalize(&invoked_from)
+        .with_context(|| format!("failed to resolve {}", invoked_from.display()))?;
+
+    let start_dir = args.cwd.clone().unwrap_or_else(|| invoked_from.clone());
     // Absolute from here on. The launchers build `cd <dir> && ...` commands
     // for projects found in an ancestor, and those run with the working
     // directory already set to `start_dir` — a relative path would then be
@@ -127,7 +132,7 @@ fn run() -> Result<ExitCode> {
             let cwd = cwd.as_deref().unwrap_or(&start_dir);
             if args.print {
                 let mut out = stdout();
-                writeln!(out, "{}", in_dir_script(cwd, &script, &start_dir))?;
+                writeln!(out, "{}", in_dir_script(cwd, &script, &invoked_from)?)?;
                 out.flush()?;
                 return Ok(ExitCode::SUCCESS);
             }
@@ -135,7 +140,7 @@ fn run() -> Result<ExitCode> {
             // Echoed with the `cd` the child is given as its working
             // directory, so what is on screen is what is being run. An entry
             // from an ancestor's file otherwise looks like it runs here.
-            echo("$", &in_dir_script(cwd, &script, &start_dir))?;
+            echo("$", &in_dir_script(cwd, &script, &invoked_from)?)?;
             let status = exec::run(&script, cwd)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.
@@ -151,7 +156,7 @@ fn run() -> Result<ExitCode> {
             // whichever shell is calling — and fish, which the wrapper
             // supports, does not have it.
             for job in &jobs {
-                echo("&", &in_dir_script(cwd, &job.script, &start_dir))?;
+                echo("&", &in_dir_script(cwd, &job.script, &invoked_from)?)?;
             }
             // With `--print` the wrapper is reading stdout through a command
             // substitution and evaluates whatever comes back; a job writing
@@ -177,18 +182,41 @@ fn run() -> Result<ExitCode> {
 /// **`;` rather than `&&`.** `&&` binds tighter than `&`, so
 /// `cd dir && server &` would put the `cd` in the background along with the
 /// command and leave the rest of the script running where the shell already
-/// was. There is nothing lost by dropping the guard: `dir` is where a
-/// configuration file was read from moments earlier.
+/// was.
 ///
 /// A subshell would be the tidier tool -- it would leave the calling shell
 /// where it was -- but there is no form of one that bash, zsh *and* fish all
 /// accept, and it would swallow the `cd` and `export` effects that are the
 /// whole point of `--print`.
-fn in_dir_script(dir: &std::path::Path, script: &str, start_dir: &std::path::Path) -> String {
-    if dir == start_dir {
-        return script.to_string();
+///
+/// **The directory is checked here instead of by the `cd`.** For the same
+/// reason there is no portable grouping, there is no portable "change
+/// directory, and stop if that failed": `||` and `&&` reach one command, and
+/// `return` is not a thing fish has outside a function. So a `cd` that fails
+/// in the caller's shell would leave the rest of the script running wherever
+/// that shell already was, which for a path-sensitive command is much worse
+/// than not running it. Refusing here is what [`exec::run`] does on the other
+/// path, where `Command::current_dir` never starts the child at all. It leaves
+/// the moment between this check and the shell's `cd` uncovered, which is as
+/// close as a printed command can get.
+fn in_dir_script(
+    dir: &std::path::Path,
+    script: &str,
+    invoked_from: &std::path::Path,
+) -> Result<String> {
+    if dir == invoked_from {
+        return Ok(script.to_string());
     }
-    format!("cd {}; {script}", launchers::quote(&dir.to_string_lossy()))
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "{} is no longer a directory, so the entry has nowhere to run",
+            dir.display()
+        );
+    }
+    Ok(format!(
+        "cd {}; {script}",
+        launchers::quote(&dir.to_string_lossy())
+    ))
 }
 
 /// Echo a command before it runs, the way a shell shows what it is doing.
@@ -315,21 +343,31 @@ mod tests {
         assert_eq!(parsed.menu.len(), 5);
     }
 
+    /// A directory that exists, so that only the path-building is under test.
+    fn existing_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jj-menu-main-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn a_script_is_printed_unchanged_when_it_already_runs_here() {
-        let here = std::path::Path::new("/tmp/project");
-        assert_eq!(in_dir_script(here, "make build", here), "make build");
+        let here = existing_dir("unchanged");
+        assert_eq!(
+            in_dir_script(&here, "make build", &here).unwrap(),
+            "make build"
+        );
     }
 
     #[test]
     fn a_script_from_another_directory_is_printed_with_a_cd() {
+        let dir = existing_dir("quoted-'-name");
         assert_eq!(
-            in_dir_script(
-                std::path::Path::new("/tmp/pro'ject"),
-                "make build",
-                std::path::Path::new("/tmp/pro'ject/sub"),
+            in_dir_script(&dir, "make build", &dir.join("sub")).unwrap(),
+            format!(
+                "cd {}; make build",
+                launchers::quote(&dir.to_string_lossy())
             ),
-            r"cd '/tmp/pro'\''ject'; make build",
             "the directory is quoted for the shell that will evaluate this"
         );
     }
@@ -339,13 +377,23 @@ mod tests {
         // `&&` would bind tighter than the `&`, backgrounding the `cd` along
         // with the server and leaving the next line where the shell already
         // was. Every command of the script has to end up in the directory.
-        let printed = in_dir_script(
-            std::path::Path::new("/tmp/project"),
-            "server &\nnext",
-            std::path::Path::new("/tmp/project/sub"),
-        );
-        assert_eq!(printed, "cd '/tmp/project'; server &\nnext");
+        let dir = existing_dir("whole-script");
+        let printed = in_dir_script(&dir, "server &\nnext", &dir.join("sub")).unwrap();
+        assert!(printed.ends_with("; server &\nnext"), "{printed}");
         assert!(!printed.contains("&&"), "{printed}");
+    }
+
+    #[test]
+    fn refuses_to_print_a_cd_into_a_directory_that_is_gone() {
+        // The caller's shell cannot be told "cd, and stop if that failed" in a
+        // way bash, zsh and fish all read the same, so a failed `cd` there
+        // would run the script in whatever directory the shell was already in.
+        let gone = std::env::temp_dir().join("jj-menu-main-no-such-directory");
+        let _ = std::fs::remove_dir_all(&gone);
+        let err = in_dir_script(&gone, "rm -rf build", std::path::Path::new("/tmp"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no longer a directory"), "{err}");
     }
 
     #[test]

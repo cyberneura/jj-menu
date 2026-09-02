@@ -65,13 +65,23 @@ of any automated check.
   while a project file defaults to its own directory. Collapsing it to `bool`
   loses that distinction.
 - **`--print` has to carry the directory itself.** The wrapper evaluates the
-  command in the user's shell, which is in `start_dir`, so `main::in_dir_script`
-  prefixes it. `cd <dir>;` and not `cd <dir> &&`: `&&` binds tighter than `&`,
-  so an entry starting `server &` would background the `cd` with it and leave
-  the rest of the script where the shell already was. A subshell would keep the
-  shell from being moved, but has no form bash, zsh *and* fish all accept, and
-  would drop the `cd` / `export` effects the wrapper exists for.
-  `launchers::in_dir` is the single-command version and keeps its `&&`.
+  command in the user's shell, so `main::in_dir_script` prefixes it.
+  `cd <dir>;` and not `cd <dir> &&`: `&&` binds tighter than `&`, so an entry
+  starting `server &` would background the `cd` with it and leave the rest of
+  the script where the shell already was. A subshell would keep the shell from
+  being moved, but has no form bash, zsh *and* fish all accept, and would drop
+  the `cd` / `export` effects the wrapper exists for. `launchers::in_dir` is
+  the single-command version and keeps its `&&`.
+- **`start_dir` is not where the calling shell is standing.** `--cwd` moves the
+  first and not the second, so `main` keeps `invoked_from` separately, and that
+  is what decides whether a printed command needs a `cd` at all. Comparing
+  against `start_dir` makes `jj --cwd /project` from /tmp print a bare command
+  that the shell then runs in /tmp.
+- **A printed `cd` is checked before it is printed, not by the shell.** For the
+  same reason there is no portable grouping there is no portable "cd, or stop",
+  so a `cd` that fails in the caller's shell would run the script wherever that
+  shell already was. `in_dir_script` returns an error instead, which is what
+  `Command::current_dir` does for `exec::run`.
 - The same prefix goes on the `$` echo, so what is on screen is what the child
   is actually given as its working directory.
 

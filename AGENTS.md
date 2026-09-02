@@ -65,10 +65,13 @@ of any automated check.
   while a project file defaults to its own directory. Collapsing it to `bool`
   loses that distinction.
 - **`--print` has to carry the directory itself.** The wrapper evaluates the
-  command in the user's shell, which is in `start_dir`, so `main` prefixes it
-  with `launchers::in_dir` — a `cd` valid in bash, zsh *and* fish. A subshell
-  would keep the shell from being moved but has no form all three accept, and
+  command in the user's shell, which is in `start_dir`, so `main::in_dir_script`
+  prefixes it. `cd <dir>;` and not `cd <dir> &&`: `&&` binds tighter than `&`,
+  so an entry starting `server &` would background the `cd` with it and leave
+  the rest of the script where the shell already was. A subshell would keep the
+  shell from being moved, but has no form bash, zsh *and* fish all accept, and
   would drop the `cd` / `export` effects the wrapper exists for.
+  `launchers::in_dir` is the single-command version and keeps its `&&`.
 - The same prefix goes on the `$` echo, so what is on screen is what the child
   is actually given as its working directory.
 

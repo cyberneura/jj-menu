@@ -126,14 +126,8 @@ fn run() -> Result<ExitCode> {
         ui::Outcome::Run(Launch::Script(script), cwd) => {
             let cwd = cwd.as_deref().unwrap_or(&start_dir);
             if args.print {
-                // The wrapper evaluates this in the calling shell, which is
-                // sitting in `start_dir`, so the directory has to travel with
-                // the command. It stays in effect afterwards -- that a `cd`
-                // reaches your own shell is what the wrapper is for, and an
-                // entry that would rather not move you says
-                // `run_in_current_directory`.
                 let mut out = stdout();
-                writeln!(out, "{}", launchers::in_dir(cwd, &script, &start_dir))?;
+                writeln!(out, "{}", in_dir_script(cwd, &script, &start_dir))?;
                 out.flush()?;
                 return Ok(ExitCode::SUCCESS);
             }
@@ -141,7 +135,7 @@ fn run() -> Result<ExitCode> {
             // Echoed with the `cd` the child is given as its working
             // directory, so what is on screen is what is being run. An entry
             // from an ancestor's file otherwise looks like it runs here.
-            echo("$", &launchers::in_dir(cwd, &script, &start_dir))?;
+            echo("$", &in_dir_script(cwd, &script, &start_dir))?;
             let status = exec::run(&script, cwd)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.
@@ -157,7 +151,7 @@ fn run() -> Result<ExitCode> {
             // whichever shell is calling — and fish, which the wrapper
             // supports, does not have it.
             for job in &jobs {
-                echo("&", &launchers::in_dir(cwd, &job.script, &start_dir))?;
+                echo("&", &in_dir_script(cwd, &job.script, &start_dir))?;
             }
             // With `--print` the wrapper is reading stdout through a command
             // substitution and evaluates whatever comes back; a job writing
@@ -170,6 +164,31 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::from(parallel::run(&jobs, cwd, output)?))
         }
     }
+}
+
+/// Prefix a whole script with the `cd` that puts it in `dir`.
+///
+/// `--print` hands the command to the calling shell, which is the one process
+/// whose working directory `exec::run` cannot set, so the directory has to be
+/// part of the command itself. That `cd` stays in effect afterwards: a
+/// directory change reaching your own shell is what the wrapper is for, and an
+/// entry that would rather not move you says `run_in_current_directory`.
+///
+/// **`;` rather than `&&`.** `&&` binds tighter than `&`, so
+/// `cd dir && server &` would put the `cd` in the background along with the
+/// command and leave the rest of the script running where the shell already
+/// was. There is nothing lost by dropping the guard: `dir` is where a
+/// configuration file was read from moments earlier.
+///
+/// A subshell would be the tidier tool -- it would leave the calling shell
+/// where it was -- but there is no form of one that bash, zsh *and* fish all
+/// accept, and it would swallow the `cd` and `export` effects that are the
+/// whole point of `--print`.
+fn in_dir_script(dir: &std::path::Path, script: &str, start_dir: &std::path::Path) -> String {
+    if dir == start_dir {
+        return script.to_string();
+    }
+    format!("cd {}; {script}", launchers::quote(&dir.to_string_lossy()))
 }
 
 /// Echo a command before it runs, the way a shell shows what it is doing.
@@ -294,6 +313,39 @@ mod tests {
         let parsed = config::loader::parse(std::path::Path::new("sample.yaml"), &sample)
             .expect("the sample in the help text must parse");
         assert_eq!(parsed.menu.len(), 5);
+    }
+
+    #[test]
+    fn a_script_is_printed_unchanged_when_it_already_runs_here() {
+        let here = std::path::Path::new("/tmp/project");
+        assert_eq!(in_dir_script(here, "make build", here), "make build");
+    }
+
+    #[test]
+    fn a_script_from_another_directory_is_printed_with_a_cd() {
+        assert_eq!(
+            in_dir_script(
+                std::path::Path::new("/tmp/pro'ject"),
+                "make build",
+                std::path::Path::new("/tmp/pro'ject/sub"),
+            ),
+            r"cd '/tmp/pro'\''ject'; make build",
+            "the directory is quoted for the shell that will evaluate this"
+        );
+    }
+
+    #[test]
+    fn the_cd_covers_the_whole_script_not_just_its_first_command() {
+        // `&&` would bind tighter than the `&`, backgrounding the `cd` along
+        // with the server and leaving the next line where the shell already
+        // was. Every command of the script has to end up in the directory.
+        let printed = in_dir_script(
+            std::path::Path::new("/tmp/project"),
+            "server &\nnext",
+            std::path::Path::new("/tmp/project/sub"),
+        );
+        assert_eq!(printed, "cd '/tmp/project'; server &\nnext");
+        assert!(!printed.contains("&&"), "{printed}");
     }
 
     #[test]

@@ -80,14 +80,11 @@ pub fn find_up(start_dir: &Path, names: &[&str]) -> Option<PathBuf> {
     None
 }
 
-/// Prefix a command with `cd` when it belongs somewhere other than the working
-/// directory, so an entry found in an ancestor still runs in the right place.
+/// Prefix a command with `cd` when the project lives outside the working
+/// directory, so entries found in an ancestor still run in the right place.
 ///
-/// Used for the launchers, whose commands are a plain string, and by `main`
-/// for `--print` and the `$` echo, where the working directory has to be
-/// visible in the command itself. The form is deliberately the plainest one
-/// there is: `--print` is evaluated by bash, zsh *or* fish, and `cd x && y` is
-/// what all three of them agree on.
+/// For a launcher's own command, which is a single one. A configured entry can
+/// be a whole script and needs `crate::in_dir_script` instead.
 ///
 /// The path is quoted with single quotes; an embedded single quote is escaped
 /// the POSIX way (`'\''`).

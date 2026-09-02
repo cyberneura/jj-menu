@@ -289,11 +289,11 @@ default; an entry that overrides it is not listed separately.
 
 Two things follow from this:
 
-- **Under the shell wrapper the command is prefixed with a `cd`**, since the
-  wrapper evaluates it in your shell rather than in a child process. That `cd`
-  stays in effect afterwards — a directory change reaching your own shell is
-  what the wrapper is for. An entry that should leave you where you are needs
-  `run_in_current_directory: true`.
+- **Under the shell wrapper the command is prefixed with `cd <dir>;`**, since
+  the wrapper evaluates it in your shell rather than in a child process. That
+  `cd` stays in effect afterwards — a directory change reaching your own shell
+  is what the wrapper is for. An entry that should leave you where you are
+  needs `run_in_current_directory: true`.
 - Entries from the automatic launchers are unaffected: they are found relative
   to the working directory and already carry their own `cd` when the project
   they belong to is in an ancestor.

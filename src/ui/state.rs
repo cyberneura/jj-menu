@@ -202,6 +202,10 @@ impl MenuState {
                 shell: item.shell.clone(),
                 parallel: item.parallel.clone(),
                 args: item.args.clone(),
+                // Everything that decides what running it does has to be
+                // carried over: this row is the same command, reached the
+                // long way round, and it must not run somewhere else for it.
+                cwd: item.cwd.clone(),
                 ..Default::default()
             });
         }
@@ -253,6 +257,7 @@ impl MenuState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     fn items(n: usize) -> Vec<MenuItem> {
         (0..n)
@@ -326,6 +331,21 @@ mod tests {
         assert!(s.leave_detail());
         assert_eq!(s.depth(), 1);
         assert_eq!(s.cursor(), 1, "the parent cursor is restored");
+    }
+
+    #[test]
+    fn the_detail_views_run_row_keeps_the_entrys_directory() {
+        // The row is the same command reached the long way round. Losing the
+        // directory here would run an ancestor's entry in the wrong place,
+        // but only when it was started from the detail view.
+        let mut parent = MenuItem::command("parent", "true");
+        parent.help = Some("has a detail view".into());
+        parent.cwd = Some(PathBuf::from("/tmp/project"));
+        let mut s = MenuState::new(Frame::new("root", vec![parent]));
+
+        assert!(s.enter_detail());
+        assert_eq!(s.items()[0].label(), "Run: parent");
+        assert_eq!(s.items()[0].cwd.as_deref(), Some(Path::new("/tmp/project")));
     }
 
     #[test]

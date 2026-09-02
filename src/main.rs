@@ -140,7 +140,7 @@ fn run() -> Result<ExitCode> {
             // Echoed with the `cd` the child is given as its working
             // directory, so what is on screen is what is being run. An entry
             // from an ancestor's file otherwise looks like it runs here.
-            echo("$", &in_dir_script(cwd, &script, &invoked_from)?)?;
+            echo("$", &echo_script(cwd, &script, &invoked_from))?;
             let status = exec::run(&script, cwd)?;
             // Pass the command's exit code through, so `jj && next` and `$?`
             // behave the way they would for a typed command.
@@ -156,7 +156,7 @@ fn run() -> Result<ExitCode> {
             // whichever shell is calling — and fish, which the wrapper
             // supports, does not have it.
             for job in &jobs {
-                echo("&", &in_dir_script(cwd, &job.script, &invoked_from)?)?;
+                echo("&", &echo_script(cwd, &job.script, &invoked_from))?;
             }
             // With `--print` the wrapper is reading stdout through a command
             // substitution and evaluates whatever comes back; a job writing
@@ -213,10 +213,27 @@ fn in_dir_script(
             dir.display()
         );
     }
-    Ok(format!(
-        "cd {}; {script}",
-        launchers::quote(&dir.to_string_lossy())
-    ))
+    // A shell command is text, and a path on Unix is bytes. `to_string_lossy`
+    // would hand the shell a `cd` into a path with U+FFFD where the original
+    // bytes were -- a different directory, and almost certainly a missing one,
+    // which lands right back in the case above.
+    let Some(dir) = dir.to_str() else {
+        anyhow::bail!(
+            "{} cannot be put in a shell command: its name is not valid UTF-8",
+            dir.display()
+        );
+    };
+    Ok(format!("cd {}; {script}", launchers::quote(dir)))
+}
+
+/// The same, for showing on screen before the command runs.
+///
+/// Cosmetic, so a directory that cannot be written as a command is shown as
+/// the bare script rather than stopping the entry: on this path the child is
+/// given the directory through `Command::current_dir`, which takes the bytes
+/// as they are and reports its own error if they have gone stale.
+fn echo_script(dir: &std::path::Path, script: &str, invoked_from: &std::path::Path) -> String {
+    in_dir_script(dir, script, invoked_from).unwrap_or_else(|_| script.to_string())
 }
 
 /// Echo a command before it runs, the way a shell shows what it is doing.
@@ -314,6 +331,8 @@ To make `cd` inside a menu entry affect your shell, add the wrapper function:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
 
     #[test]
     fn the_help_text_shows_a_usable_example() {
@@ -394,6 +413,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no longer a directory"), "{err}");
+    }
+
+    #[test]
+    fn refuses_to_print_a_cd_into_a_name_that_is_not_utf8() {
+        // Lossily converting it would send the shell to a *different* path,
+        // and the `;` would then run the script where the shell already was.
+        let dir = existing_dir("utf8").join(OsStr::from_bytes(b"broken-\xff-name"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = in_dir_script(&dir, "rm -rf build", std::path::Path::new("/tmp"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn the_echo_shows_the_script_rather_than_refusing_it() {
+        // `Command::current_dir` takes the bytes as they are, so the entry
+        // still runs; only the line shown above it loses the directory.
+        let dir = existing_dir("utf8").join(OsStr::from_bytes(b"broken-\xff-name"));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            echo_script(&dir, "make build", std::path::Path::new("/tmp")),
+            "make build"
+        );
     }
 
     #[test]
